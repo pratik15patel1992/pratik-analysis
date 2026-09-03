@@ -5,9 +5,12 @@ import threading
 from pathlib import Path
 from datetime import datetime, timedelta
 
-from flask import Flask, render_template, redirect, request, jsonify
+from flask import Flask, render_template, redirect, request, jsonify, send_file
 from kiteconnect import KiteConnect, KiteTicker
-
+from io import BytesIO
+from openpyxl import Workbook
+from openpyxl.chart import LineChart, Reference
+from openpyxl.styles import Font, Alignment
 
 # ============================================================
 # CONFIGURATION
@@ -2017,7 +2020,138 @@ def api_history_cio(day):
         }
     )
 
+@app.route("/api/download/cio/<day>")
+def download_cio_excel(day):
 
+    path = history_file(day)
+
+    if not path.exists():
+        return jsonify({
+            "error": "No stored CIO data for selected date."
+        }), 404
+
+    data = load_day_history(day)
+    cio_data = data.get("series", {}).get("cio", [])
+
+    if not cio_data:
+        return jsonify({
+            "error": "No CIO data available for selected date."
+        }), 404
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "CIO Data"
+
+    # Report heading
+    ws["A1"] = "Pratik Analysis"
+    ws["A2"] = "CIO — Negative Change in Open Interest"
+
+    ws["A1"].font = Font(bold=True, size=16)
+    ws["A2"].font = Font(bold=True, size=13)
+
+    # Session details
+    ws["A4"] = "Date"
+    ws["B4"] = day
+
+    ws["A5"] = "NIFTY Opening ATM"
+    ws["B5"] = data.get("opening_atm")
+
+    ws["A6"] = "Nearest Expiry"
+    ws["B6"] = data.get("expiry")
+
+    # Table headings
+    headers = [
+        "Time",
+        "CE Negative Change in OI",
+        "PE Negative Change in OI"
+    ]
+
+    header_row = 8
+
+    for col, value in enumerate(headers, 1):
+        cell = ws.cell(
+            row=header_row,
+            column=col,
+            value=value
+        )
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center")
+
+    # CIO data
+    for row_no, point in enumerate(cio_data, start=9):
+
+        ws.cell(
+            row=row_no,
+            column=1,
+            value=point.get("time")
+        )
+
+        ws.cell(
+            row=row_no,
+            column=2,
+            value=point.get("ce")
+        )
+
+        ws.cell(
+            row=row_no,
+            column=3,
+            value=point.get("pe")
+        )
+
+    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["B"].width = 28
+    ws.column_dimensions["C"].width = 28
+
+    # Excel chart
+    if len(cio_data) >= 2:
+
+        chart = LineChart()
+        chart.title = "CIO — Negative Change in Open Interest"
+        chart.y_axis.title = "Negative Change in OI"
+        chart.x_axis.title = "Time"
+
+        chart.height = 14
+        chart.width = 28
+
+        last_row = 8 + len(cio_data)
+
+        values = Reference(
+            ws,
+            min_col=2,
+            max_col=3,
+            min_row=8,
+            max_row=last_row
+        )
+
+        times = Reference(
+            ws,
+            min_col=1,
+            min_row=9,
+            max_row=last_row
+        )
+
+        chart.add_data(
+            values,
+            titles_from_data=True
+        )
+
+        chart.set_categories(times)
+
+        ws.add_chart(chart, "E4")
+
+    # Generate Excel file
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    filename = f"Pratik_Analysis_CIO_{day}.xlsx"
+
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 @app.route("/health")
 def health():
 
