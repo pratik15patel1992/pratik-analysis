@@ -21,6 +21,9 @@ from openpyxl import Workbook
 from openpyxl.chart import LineChart, Reference
 from openpyxl.styles import Font, Alignment
 
+import psycopg
+from psycopg.types.json import Jsonb
+
 
 # ============================================================
 # CONFIGURATION
@@ -30,6 +33,7 @@ APP_SECRET = os.environ.get("APP_SECRET", "change-me")
 KITE_API_KEY = os.environ.get("KITE_API_KEY", "")
 KITE_API_SECRET = os.environ.get("KITE_API_SECRET", "")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET
@@ -201,6 +205,158 @@ def safe_json_save(path, data):
 
 
 # ============================================================
+# PERMANENT DATABASE (NEON POSTGRESQL)
+# ============================================================
+
+def db_enabled():
+    return bool(DATABASE_URL)
+
+
+def db_connect():
+    if not DATABASE_URL:
+        return None
+
+    return psycopg.connect(
+        DATABASE_URL,
+        connect_timeout=10,
+    )
+
+
+def init_db():
+    if not db_enabled():
+        print(
+            "[DB] DATABASE_URL not configured; using local history fallback.",
+            flush=True,
+        )
+        return False
+
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS pratik_daily_history (
+                        day DATE PRIMARY KEY,
+                        payload JSONB NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            conn.commit()
+
+        print(
+            "[DB] Neon history table ready.",
+            flush=True,
+        )
+        return True
+
+    except Exception as e:
+        print(
+            f"[DB] Database initialization failed: {e}",
+            flush=True,
+        )
+        return False
+
+
+def save_history_to_db(day, payload):
+    if not db_enabled():
+        return False
+
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO pratik_daily_history (day, payload, updated_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (day)
+                    DO UPDATE SET
+                        payload = EXCLUDED.payload,
+                        updated_at = NOW()
+                    """,
+                    (day, Jsonb(payload)),
+                )
+            conn.commit()
+
+        return True
+
+    except Exception as e:
+        print(
+            f"[DB] History save failed for {day}: {e}",
+            flush=True,
+        )
+        return False
+
+
+def load_history_from_db(day):
+    if not db_enabled():
+        return None
+
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT payload
+                    FROM pratik_daily_history
+                    WHERE day = %s
+                    """,
+                    (day,),
+                )
+                row = cur.fetchone()
+
+        if not row:
+            return None
+
+        payload = row[0]
+
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+
+        return payload
+
+    except Exception as e:
+        print(
+            f"[DB] History load failed for {day}: {e}",
+            flush=True,
+        )
+        return None
+
+
+def db_history_dates():
+    if not db_enabled():
+        return []
+
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT day
+                    FROM pratik_daily_history
+                    ORDER BY day DESC
+                    """
+                )
+                rows = cur.fetchall()
+
+        return [row[0].isoformat() for row in rows]
+
+    except Exception as e:
+        print(
+            f"[DB] History date load failed: {e}",
+            flush=True,
+        )
+        return []
+
+
+def history_exists(day):
+    if load_history_from_db(day) is not None:
+        return True
+
+    return history_file(day).exists()
+
+
+# ============================================================
 # HISTORY
 # ============================================================
 
@@ -209,6 +365,11 @@ def history_file(day):
 
 
 def load_day_history(day):
+    db_data = load_history_from_db(day)
+
+    if db_data is not None:
+        return db_data
+
     return safe_json_load(
         history_file(day),
         {
@@ -230,12 +391,15 @@ def load_day_history(day):
 
 
 def refresh_history_dates():
-    dates = []
+    dates = set(db_history_dates())
 
     for f in HISTORY_DIR.glob("*.json"):
-        dates.append(f.stem)
+        dates.add(f.stem)
 
-    dates.sort(reverse=True)
+    dates = sorted(
+        dates,
+        reverse=True,
+    )
 
     with lock:
         state["history_dates"] = dates
@@ -257,8 +421,15 @@ def save_current_history():
             "saved_at": now_ist().isoformat(),
         }
 
+    # Local file remains as a temporary fallback.
     safe_json_save(
         history_file(day),
+        payload,
+    )
+
+    # Neon PostgreSQL is the permanent source of truth.
+    save_history_to_db(
+        day,
         payload,
     )
 
@@ -1286,6 +1457,7 @@ def restore_today_history():
             ]
 
 
+init_db()
 restore_today_history()
 refresh_history_dates()
 
@@ -1433,9 +1605,7 @@ def api_history_dates():
 
 @app.route("/api/history/<day>")
 def api_history_day(day):
-    path = history_file(day)
-
-    if not path.exists():
+    if not history_exists(day):
         return jsonify(
             {
                 "error": (
@@ -1475,9 +1645,7 @@ def api_history_cio(day):
                 }
             )
 
-    path = history_file(day)
-
-    if not path.exists():
+    if not history_exists(day):
         return jsonify(
             {
                 "error": (
@@ -1549,9 +1717,7 @@ def download_cio_excel(day):
     # ---------------------------------------------
     else:
 
-        path = history_file(day)
-
-        if not path.exists():
+        if not history_exists(day):
             return jsonify(
                 {
                     "error": (
@@ -1794,6 +1960,8 @@ def health():
             ),
             "baseline_ready": baseline_ready,
             "oic_tokens": oic_tokens,
+            "database_configured": db_enabled(),
+            "database_history_days": len(db_history_dates()),
             "cio_points": len(
                 state.get(
                     "series",
