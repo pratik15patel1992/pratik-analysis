@@ -1,75 +1,2047 @@
-
 <!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pratik Analysis — Live OI</title>
+
+<title>Pratik Analysis LIVE OI</title>
+
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
 <style>
 *{box-sizing:border-box}
-html,body{height:100%;margin:0}
-body{font-family:Segoe UI,Arial,sans-serif;background:#06111d;color:#eef7ff;overflow:hidden}
-header{height:58px;background:#0b1b2c;border-bottom:1px solid #24445d;padding:9px 14px;display:flex;align-items:center;justify-content:space-between}
-.brand{font-size:21px;font-weight:800}.brand b{color:#8be9fd}
-.sub{font-size:10px;color:#8ea7bf;margin-top:2px}
-.right{display:flex;align-items:center;gap:12px}.status{font-size:11px;font-weight:700}.ok{color:#54e6a3}.bad{color:#ff9aaa}
-.btn{display:inline-block;background:#4cc9f0;color:#03111c;text-decoration:none;font-weight:800;border-radius:8px;padding:8px 11px;font-size:11px}
-main{height:calc(100vh - 58px);padding:9px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:9px}
-.card{min-height:0;background:#0b1b2c;border:1px solid #24445d;border-radius:11px;padding:8px;display:flex;flex-direction:column}
-.h{display:flex;justify-content:space-between;align-items:center}.title{font-weight:800;font-size:13px}.tag{font-size:9px;color:#8be9fd}
-.desc{font-size:9px;color:#8ea7bf;margin:2px 0 4px}.chart{position:relative;flex:1;min-height:0}.chart canvas{position:absolute;inset:0;width:100%!important;height:100%!important}
-.overlay{position:fixed;inset:0;background:#06111def;display:grid;place-items:center;z-index:10}
-.box{width:min(650px,92vw);padding:24px;background:#0b1b2c;border:1px solid #315574;border-radius:14px;line-height:1.55}
-code{background:#06111d;padding:2px 5px;border-radius:4px}
-@media(max-width:800px){body{overflow:auto}main{height:auto;grid-template-columns:1fr;grid-template-rows:repeat(4,300px)}}
+
+:root{
+    --bg:#06111d;
+    --panel:#0b1b2b;
+    --panel2:#0e2235;
+    --border:#25465d;
+    --text:#eef7ff;
+    --muted:#9ab5c9;
+    --cyan:#35c8ff;
+    --pink:#ff2381;
+    --green:#46e483;
+    --red:#ff596b;
+    --purple:#8d4bff;
+    --yellow:#ffc533;
+}
+
+body.light{
+    --bg:#eef4f8;
+    --panel:#ffffff;
+    --panel2:#f6f9fc;
+    --border:#c9d7e2;
+    --text:#102333;
+    --muted:#5f7485;
+}
+
+html,body{
+    margin:0;
+    min-height:100%;
+    font-family:Segoe UI,Arial,sans-serif;
+    background:var(--bg);
+    color:var(--text);
+}
+
+body{
+    padding:10px;
+    transition:.25s;
+}
+
+button,select{
+    font:inherit;
+}
+
+.header{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:15px;
+    margin-bottom:10px;
+}
+
+.brand{
+    font-size:26px;
+    font-weight:900;
+}
+
+.brand b{color:var(--cyan)}
+
+.subtitle{
+    color:var(--muted);
+    font-size:12px;
+    margin-top:3px;
+}
+
+.headerRight{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    flex-wrap:wrap;
+    justify-content:flex-end;
+}
+
+.live{
+    color:var(--green);
+    font-weight:800;
+    font-size:13px;
+}
+
+.btn{
+    border:1px solid var(--border);
+    background:var(--panel2);
+    color:var(--text);
+    padding:9px 13px;
+    border-radius:8px;
+    cursor:pointer;
+    font-weight:700;
+}
+
+.btn:hover{
+    filter:brightness(1.15);
+}
+
+.loginBtn{
+    background:var(--cyan);
+    color:#042033;
+    border:none;
+}
+
+.logoutBtn{
+    background:transparent;
+}
+
+.themeBtn{
+    min-width:104px;
+}
+
+.topGrid{
+    display:grid;
+    grid-template-columns:1.1fr .9fr .8fr 1.2fr;
+    gap:10px;
+    margin-bottom:10px;
+}
+
+.infoCard{
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:11px;
+    padding:12px 14px;
+    min-height:112px;
+}
+
+.infoTitle{
+    font-weight:800;
+    margin-bottom:6px;
+}
+
+.bigValue{
+    font-size:28px;
+    font-weight:900;
+}
+
+.green{color:var(--green)}
+.red{color:var(--red)}
+.cyan{color:var(--cyan)}
+.pink{color:var(--pink)}
+.purple{color:#c98cff}
+.yellow{color:var(--yellow)}
+
+.small{
+    font-size:12px;
+    color:var(--muted);
+}
+
+.marketRow{
+    display:flex;
+    gap:16px;
+    flex-wrap:wrap;
+    margin-top:7px;
+    font-size:12px;
+}
+
+.zoneMain{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    margin:7px 0;
+}
+
+.zoneBadge{
+    font-size:27px;
+    font-weight:900;
+    color:#c98cff;
+}
+
+.zonePill{
+    padding:6px 9px;
+    border-radius:7px;
+    background:#201b31;
+    border:1px solid #5f3a89;
+    font-size:12px;
+}
+
+.levels{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    margin-top:4px;
+}
+
+.level{
+    text-align:center;
+    padding:2px 5px;
+    border-right:1px solid var(--border);
+}
+
+.level:last-child{
+    border-right:none;
+}
+
+.level strong{
+    font-size:20px;
+    display:block;
+}
+
+.level small{
+    color:var(--muted);
+    font-size:10px;
+}
+
+.chartGrid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:10px;
+}
+
+.chartCard{
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:10px;
+    min-height:330px;
+    position:relative;
+}
+
+.chartCard:fullscreen{
+    background:var(--bg);
+    padding:24px;
+}
+
+.chartCard:fullscreen .chartWrap{
+    height:calc(100vh - 160px);
+}
+
+.cardHeader{
+    display:flex;
+    justify-content:space-between;
+    gap:10px;
+    align-items:flex-start;
+}
+
+.cardTitle{
+    font-weight:900;
+    font-size:18px;
+}
+
+.cardSub{
+    color:var(--muted);
+    font-size:11px;
+    margin-top:3px;
+}
+
+.controls{
+    display:flex;
+    gap:5px;
+    align-items:center;
+}
+
+.fullBtn{
+    border:1px solid var(--border);
+    background:transparent;
+    color:var(--text);
+    border-radius:7px;
+    padding:6px 9px;
+    cursor:pointer;
+}
+
+.interval{
+    border:1px solid var(--border);
+    background:transparent;
+    color:var(--text);
+    padding:6px 10px;
+    cursor:pointer;
+}
+
+.interval:first-of-type{
+    border-radius:7px 0 0 7px;
+}
+
+.interval:last-child{
+    border-radius:0 7px 7px 0;
+}
+
+.interval.active{
+    background:var(--purple);
+    color:white;
+}
+
+.chartWrap{
+    height:235px;
+    margin-top:6px;
+}
+
+.chartFooter{
+    display:flex;
+    justify-content:space-between;
+    gap:10px;
+    border-top:1px solid var(--border);
+    padding-top:7px;
+    font-size:12px;
+}
+
+.rangeText{
+    color:var(--green);
+    font-weight:700;
+}
+
+.peakSummary{
+    text-align:right;
+}
+
+.bottomPanel{
+    margin-top:10px;
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:12px;
+    display:grid;
+    grid-template-columns:1.3fr 1fr 1fr;
+    gap:16px;
+}
+
+.downloadBlock{
+    display:flex;
+    gap:14px;
+    align-items:center;
+    flex-wrap:wrap;
+}
+
+.excelIcon{
+    font-size:45px;
+}
+
+.downloadBtn{
+    background:#0e5d32;
+    border:1px solid #2ed16f;
+    color:white;
+    border-radius:8px;
+    padding:12px 20px;
+    font-weight:800;
+    cursor:pointer;
+}
+
+.dateSelect{
+    background:var(--panel2);
+    color:var(--text);
+    border:1px solid var(--border);
+    border-radius:7px;
+    padding:8px 10px;
+    min-width:170px;
+}
+
+.bottomTitle{
+    font-weight:800;
+    margin-bottom:7px;
+}
+
+.check{
+    color:var(--green);
+    margin-right:5px;
+}
+
+.footer{
+    display:flex;
+    justify-content:space-between;
+    margin-top:10px;
+    color:var(--muted);
+    font-size:11px;
+}
+
+.capture{
+    color:var(--green);
+    font-weight:700;
+}
+
+#globalMessage{
+    font-size:11px;
+    color:var(--muted);
+}
+
+@media(max-width:1050px){
+    .topGrid{
+        grid-template-columns:1fr 1fr;
+    }
+}
+
+@media(max-width:850px){
+    body{padding:6px}
+
+    .chartGrid{
+        grid-template-columns:1fr;
+    }
+
+    .topGrid{
+        grid-template-columns:1fr;
+    }
+
+    .bottomPanel{
+        grid-template-columns:1fr;
+    }
+
+    .header{
+        align-items:flex-start;
+    }
+
+    .brand{
+        font-size:21px;
+    }
+
+    .chartWrap{
+        height:300px;
+    }
+}
 </style>
 </head>
+
 <body>
-{% if not configured %}
-<div class="overlay"><div class="box">
-<h2>Cloud configuration required</h2>
-<p>Add <code>KITE_API_KEY</code>, <code>KITE_API_SECRET</code>, <code>APP_SECRET</code> and <code>PUBLIC_BASE_URL</code> in your Render Environment settings.</p>
-<p>After Render gives you the final URL, set Zerodha Redirect URL to:<br><code>https://YOUR-RENDER-URL/kite/callback</code></p>
-</div></div>
-{% endif %}
-<header>
-<div><div class="brand">Pratik Analysis <b>LIVE OI</b></div><div class="sub">OIC + CIO • NIFTY option open-interest analysis</div></div>
-<div class="right"><span id="status" class="status bad">Waiting…</span><a class="btn" href="/kite/login">LOGIN WITH ZERODHA</a></div>
-</header>
-<main>
-<div class="card"><div class="h"><span id="atmTitle" class="title">OIC — ATM</span><span class="tag">OIC</span></div><div class="desc">Opening ATM locked for session • CE OI vs PE OI</div><div class="chart"><canvas id="atm"></canvas></div></div>
-<div class="card"><div class="h"><span id="minusTitle" class="title">OIC — ATM −100</span><span class="tag">OIC</span></div><div class="desc">Opening ATM −100 locked for session • CE OI vs PE OI</div><div class="chart"><canvas id="minus"></canvas></div></div>
-<div class="card"><div class="h"><span id="plusTitle" class="title">OIC — ATM +100</span><span class="tag">OIC</span></div><div class="desc">Opening ATM +100 locked for session • CE OI vs PE OI</div><div class="chart"><canvas id="plus"></canvas></div></div>
-<div class="card"><div class="h"><span class="title">CIO — Negative Change in OI</span><span class="tag">CIO</span></div><div id="cioDesc" class="desc">All nearest-expiry NIFTY strikes • negative ΔOI summed separately for CE and PE</div><div class="chart"><canvas id="cio"></canvas></div></div>
-</main>
+
+<div class="header">
+
+    <div>
+        <div class="brand">
+            Pratik Analysis <b>LIVE OI</b>
+        </div>
+
+        <div class="subtitle">
+            OIC + CIO • NIFTY option open-interest analysis
+        </div>
+    </div>
+
+    <div class="headerRight">
+
+        <div>
+            <div id="connectionStatus" class="live">
+                Waiting for Zerodha login
+            </div>
+            <div id="globalMessage"></div>
+        </div>
+
+        <a href="/kite/login">
+            <button class="btn loginBtn">
+                LOGIN WITH ZERODHA
+            </button>
+        </a>
+
+        <a href="/kite/logout">
+            <button class="btn logoutBtn">
+                LOGOUT
+            </button>
+        </a>
+
+        <button class="btn themeBtn" onclick="toggleTheme()">
+            ☀ / ☾
+        </button>
+
+    </div>
+
+</div>
+
+
+<!-- TOP INFORMATION -->
+
+<div class="topGrid">
+
+    <div class="infoCard">
+
+        <div class="infoTitle">
+            NIFTY 50 (Spot)
+        </div>
+
+        <div>
+            <span id="niftyPrice" class="bigValue green">--</span>
+            &nbsp;
+            <span id="niftyChange" class="green">--</span>
+        </div>
+
+        <div id="niftyPct" class="green">
+            --
+        </div>
+
+        <div class="marketRow">
+            <span>Prev Close: <b id="prevClose">--</b></span>
+            <span class="green">High: <b id="niftyHigh">--</b></span>
+            <span class="red">Low: <b id="niftyLow">--</b></span>
+        </div>
+
+    </div>
+
+
+    <div class="infoCard">
+
+        <div class="infoTitle">
+            India VIX
+        </div>
+
+        <div style="display:flex;gap:24px;align-items:center">
+
+            <div id="vixPrice" class="bigValue cyan">
+                --
+            </div>
+
+            <div>
+                <div>
+                    Range:
+                    <b id="vixRange" class="cyan">--</b>
+                </div>
+            </div>
+
+        </div>
+
+        <div style="margin-top:8px">
+            <span class="small">Interpretation:</span>
+            <span id="vixInterpretation" class="green">
+                --
+            </span>
+        </div>
+
+    </div>
+
+
+    <div class="infoCard">
+
+        <div class="infoTitle">
+            Opening Zone (Q1 / Q2)
+        </div>
+
+        <div class="zoneMain">
+
+            <div id="quadrant" class="zoneBadge">
+                --
+            </div>
+
+            <div id="zoneDirection" class="zonePill">
+                Waiting for opening data
+            </div>
+
+        </div>
+
+        <div class="purple">
+            Opening Zone:
+            <b id="openingZone">--</b>
+            <span id="openingPct"></span>
+        </div>
+
+    </div>
+
+
+    <div class="infoCard">
+
+        <div class="infoTitle yellow">
+            Our Levels (From Prev Close 0%)
+        </div>
+
+        <div class="levels">
+
+            <div class="level">
+                <strong class="cyan">Z0</strong>
+                <small>0% to ±0.25%</small>
+            </div>
+
+            <div class="level">
+                <strong class="green">Z1</strong>
+                <small>±0.25% to ±0.50%</small>
+            </div>
+
+            <div class="level">
+                <strong class="yellow">Z2</strong>
+                <small>±0.50% to ±0.75%</small>
+            </div>
+
+            <div class="level">
+                <strong class="red">Z3</strong>
+                <small>±0.75% to ±1.00%</small>
+            </div>
+
+        </div>
+
+        <div id="exactLevels"
+             class="small"
+             style="margin-top:9px;text-align:center">
+            Waiting for previous close...
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- CHART GRID -->
+
+<div class="chartGrid">
+
+    <div class="chartCard" id="card-atm">
+
+        <div class="cardHeader">
+
+            <div>
+                <div id="title-atm" class="cardTitle">
+                    OIC — ATM
+                </div>
+
+                <div class="cardSub">
+                    Opening ATM locked for session • CE OI vs PE OI
+                </div>
+            </div>
+
+            <div class="controls">
+                <button class="fullBtn"
+                        onclick="fullView('card-atm')">
+                    ⛶ Full View
+                </button>
+
+                <button class="interval active"
+                        data-card="atm"
+                        data-min="1">1m</button>
+
+                <button class="interval"
+                        data-card="atm"
+                        data-min="3">3m</button>
+
+                <button class="interval"
+                        data-card="atm"
+                        data-min="5">5m</button>
+
+                <button class="interval"
+                        data-card="atm"
+                        data-min="15">15m</button>
+            </div>
+
+        </div>
+
+        <div class="chartWrap">
+            <canvas id="chart-atm"></canvas>
+        </div>
+
+        <div class="chartFooter">
+            <span class="rangeText">
+                Day Range (09:15 - 15:30)
+            </span>
+
+            <span id="peak-atm" class="peakSummary">
+                --
+            </span>
+        </div>
+
+    </div>
+
+
+    <div class="chartCard" id="card-minus100">
+
+        <div class="cardHeader">
+
+            <div>
+                <div id="title-minus100" class="cardTitle">
+                    OIC — ATM −100
+                </div>
+
+                <div class="cardSub">
+                    Opening ATM −100 locked for session • CE OI vs PE OI
+                </div>
+            </div>
+
+            <div class="controls">
+
+                <button class="fullBtn"
+                        onclick="fullView('card-minus100')">
+                    ⛶ Full View
+                </button>
+
+                <button class="interval active"
+                        data-card="minus100"
+                        data-min="1">1m</button>
+
+                <button class="interval"
+                        data-card="minus100"
+                        data-min="3">3m</button>
+
+                <button class="interval"
+                        data-card="minus100"
+                        data-min="5">5m</button>
+
+                <button class="interval"
+                        data-card="minus100"
+                        data-min="15">15m</button>
+            </div>
+
+        </div>
+
+        <div class="chartWrap">
+            <canvas id="chart-minus100"></canvas>
+        </div>
+
+        <div class="chartFooter">
+            <span class="rangeText">
+                Day Range (09:15 - 15:30)
+            </span>
+
+            <span id="peak-minus100" class="peakSummary">
+                --
+            </span>
+        </div>
+
+    </div>
+
+
+    <div class="chartCard" id="card-plus100">
+
+        <div class="cardHeader">
+
+            <div>
+                <div id="title-plus100" class="cardTitle">
+                    OIC — ATM +100
+                </div>
+
+                <div class="cardSub">
+                    Opening ATM +100 locked for session • CE OI vs PE OI
+                </div>
+            </div>
+
+            <div class="controls">
+
+                <button class="fullBtn"
+                        onclick="fullView('card-plus100')">
+                    ⛶ Full View
+                </button>
+
+                <button class="interval active"
+                        data-card="plus100"
+                        data-min="1">1m</button>
+
+                <button class="interval"
+                        data-card="plus100"
+                        data-min="3">3m</button>
+
+                <button class="interval"
+                        data-card="plus100"
+                        data-min="5">5m</button>
+
+                <button class="interval"
+                        data-card="plus100"
+                        data-min="15">15m</button>
+            </div>
+
+        </div>
+
+        <div class="chartWrap">
+            <canvas id="chart-plus100"></canvas>
+        </div>
+
+        <div class="chartFooter">
+
+            <span class="rangeText">
+                Day Range (09:15 - 15:30)
+            </span>
+
+            <span id="peak-plus100" class="peakSummary">
+                --
+            </span>
+
+        </div>
+
+    </div>
+
+
+    <div class="chartCard" id="card-cio">
+
+        <div class="cardHeader">
+
+            <div>
+                <div class="cardTitle">
+                    CIO — Negative Change in OI
+                </div>
+
+                <div class="cardSub">
+                    All nearest-expiry NIFTY strikes • only negative Change in OI is summed separately
+                </div>
+            </div>
+
+            <div class="controls">
+
+                <button class="fullBtn"
+                        onclick="fullView('card-cio')">
+                    ⛶ Full View
+                </button>
+
+                <button class="interval active"
+                        data-card="cio"
+                        data-min="1">1m</button>
+
+                <button class="interval"
+                        data-card="cio"
+                        data-min="3">3m</button>
+
+                <button class="interval"
+                        data-card="cio"
+                        data-min="5">5m</button>
+
+                <button class="interval"
+                        data-card="cio"
+                        data-min="15">15m</button>
+
+            </div>
+
+        </div>
+
+        <div class="chartWrap">
+            <canvas id="chart-cio"></canvas>
+        </div>
+
+        <div class="chartFooter">
+
+            <span class="rangeText">
+                Day Range (09:15 - 15:30)
+            </span>
+
+            <span id="peak-cio" class="peakSummary">
+                --
+            </span>
+
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- HISTORY + CIO DOWNLOAD -->
+
+<div class="bottomPanel">
+
+    <div>
+
+        <div class="bottomTitle">
+            Download CIO Data (Excel)
+        </div>
+
+        <div class="downloadBlock">
+
+            <div class="excelIcon">📊</div>
+
+            <div>
+                <div class="small">
+                    Select any stored trading date
+                </div>
+
+                <select id="historyDate"
+                        class="dateSelect">
+                </select>
+
+                <div id="firstAvailable"
+                     class="small"
+                     style="margin-top:5px">
+                    --
+                </div>
+            </div>
+
+            <button class="downloadBtn"
+                    onclick="downloadCIO()">
+                Download CIO Excel
+                <br>
+                <small>(Includes Chart)</small>
+            </button>
+
+        </div>
+
+    </div>
+
+
+    <div>
+
+        <div class="bottomTitle">
+            What's included?
+        </div>
+
+        <div class="small">
+            <p><span class="check">✓</span>
+                CIO CE negative ΔOI & PE negative ΔOI
+            </p>
+
+            <p><span class="check">✓</span>
+                Complete stored timestamps
+            </p>
+
+            <p><span class="check">✓</span>
+                CIO chart
+            </p>
+
+            <p><span class="check">✓</span>
+                Date, expiry and opening ATM
+            </p>
+        </div>
+
+    </div>
+
+
+    <div>
+
+        <div class="bottomTitle">
+            Session Info
+        </div>
+
+        <div class="small">
+            <div>Date: <b id="sessionDate">--</b></div>
+            <div>Market: NIFTY 50</div>
+            <div>Expiry: <b id="sessionExpiry">--</b></div>
+            <div>Opening ATM: <b id="sessionATM">--</b></div>
+            <div>Data Range: 09:15 – 15:30 IST</div>
+        </div>
+
+    </div>
+
+</div>
+
+
+<div class="footer">
+
+    <span>
+        All times are in IST (Asia/Kolkata)
+    </span>
+
+    <span class="capture">
+        Data captured for entire trading session (09:15 – 15:30)
+    </span>
+
+    <span>
+        Pratik Analysis LIVE OI
+    </span>
+
+</div>
+
+
 <script>
-Chart.defaults.color="#8ea7bf";Chart.defaults.borderColor="#234660";Chart.defaults.animation=false;
-function mk(id,l1,l2){
- return new Chart(document.getElementById(id),{type:"line",data:{labels:[],datasets:[
-  {label:l1,data:[],borderColor:"#4cc9f0",borderWidth:2,pointRadius:0},
-  {label:l2,data:[],borderColor:"#f72585",borderWidth:2,pointRadius:0}
- ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{boxWidth:12,font:{size:9}}}},
- scales:{x:{ticks:{maxTicksLimit:7,font:{size:8}}},y:{ticks:{font:{size:8}}}}}})
+
+const INR = new Intl.NumberFormat("en-IN");
+
+const COLORS = {
+    cyan:"#35c8ff",
+    pink:"#ff2381",
+    green:"#46e483",
+    grid:"#24465d",
+    text:"#a9c0d0"
+};
+
+const intervals = {
+    atm:1,
+    minus100:1,
+    plus100:1,
+    cio:1
+};
+
+let currentState = null;
+
+let currentData = {
+    atm:[],
+    minus100:[],
+    plus100:[],
+    cio:[]
+};
+
+let viewingHistory = false;
+
+
+/* ==========================================================
+   NUMBER FORMAT
+========================================================== */
+
+function fmt(v){
+    if(v === null || v === undefined || isNaN(v))
+        return "--";
+
+    return INR.format(Math.round(v));
 }
-const a=mk("atm","CE OI","PE OI"),m=mk("minus","CE OI","PE OI"),p=mk("plus","CE OI","PE OI"),c=mk("cio","CE negative ΔOI","PE negative ΔOI");
-function set2(ch,arr){
- ch.data.labels=arr.map(x=>x.t); ch.data.datasets[0].data=arr.map(x=>x.ce); ch.data.datasets[1].data=arr.map(x=>x.pe); ch.update("none");
+
+function fmt2(v){
+    if(v === null || v === undefined || isNaN(v))
+        return "--";
+
+    return Number(v).toFixed(2);
 }
-async function refresh(){
- try{
-  const s=await (await fetch("/api/state",{cache:"no-store"})).json();
-  const st=document.getElementById("status"); st.textContent=s.message; st.className="status "+(s.connected?"ok":"bad");
-  document.getElementById("atmTitle").textContent=`OIC — ${s.oic.atm??"ATM"}`;
-  document.getElementById("minusTitle").textContent=`OIC — ${s.oic.minus100??"ATM −100"}`;
-  document.getElementById("plusTitle").textContent=`OIC — ${s.oic.plus100??"ATM +100"}`;
-  document.getElementById("cioDesc").textContent=s.cio.baseline_ready
-   ? "All nearest-expiry NIFTY strikes • only negative Change in OI is summed separately"
-   : "Preparing previous-day OI baseline for CIO…";
-  set2(a,s.oic.series.atm||[]);set2(m,s.oic.series.minus100||[]);set2(p,s.oic.series.plus100||[]);set2(c,s.cio.series||[]);
- }catch(e){}
+
+
+/* ==========================================================
+   SESSION LABELS
+========================================================== */
+
+function sessionLabels(step){
+
+    const labels=[];
+
+    let total=9*60+15;
+    const end=15*60+30;
+
+    while(total<=end){
+
+        const h=Math.floor(total/60);
+        const m=total%60;
+
+        labels.push(
+            String(h).padStart(2,"0") + ":" +
+            String(m).padStart(2,"0")
+        );
+
+        total+=step;
+    }
+
+    return labels;
 }
-setInterval(refresh,1000);refresh();
+
+
+/* ==========================================================
+   AGGREGATION
+   Uses the latest available 1-minute value in each bucket.
+========================================================== */
+
+function aggregateSeries(points,step){
+
+    if(!Array.isArray(points))
+        return [];
+
+    const buckets={};
+
+    points.forEach(p=>{
+
+        if(!p.time)
+            return;
+
+        const parts=p.time.split(":");
+
+        let h=parseInt(parts[0]);
+        let m=parseInt(parts[1]);
+
+        const total=h*60+m;
+
+        const marketStart=9*60+15;
+
+        if(total<marketStart)
+            return;
+
+        const offset=total-marketStart;
+
+        const bucketStart=
+            marketStart+
+            Math.floor(offset/step)*step;
+
+        const bh=Math.floor(bucketStart/60);
+        const bm=bucketStart%60;
+
+        const key=
+            String(bh).padStart(2,"0")+
+            ":"+
+            String(bm).padStart(2,"0");
+
+        buckets[key]=p;
+    });
+
+    return buckets;
+}
+
+
+/* ==========================================================
+   PEAK LABEL PLUGIN
+========================================================== */
+
+const peakPlugin={
+
+    id:"peakPlugin",
+
+    afterDatasetsDraw(chart){
+
+        const ctx=chart.ctx;
+
+        let candidates=[];
+
+        chart.data.datasets.forEach((dataset,di)=>{
+
+            dataset.data.forEach((v,i)=>{
+
+                if(v===null || v===undefined)
+                    return;
+
+                candidates.push({
+                    value:Number(v),
+                    index:i,
+                    datasetIndex:di
+                });
+
+            });
+
+        });
+
+        if(!candidates.length)
+            return;
+
+        const maxPoint=
+            candidates.reduce((a,b)=>
+                b.value>a.value?b:a
+            );
+
+        const minPoint=
+            candidates.reduce((a,b)=>
+                b.value<a.value?b:a
+            );
+
+        drawPeak(chart,maxPoint,"High");
+        drawPeak(chart,minPoint,"Low");
+    }
+
+};
+
+
+function drawPeak(chart,p,label){
+
+    const meta=
+        chart.getDatasetMeta(
+            p.datasetIndex
+        );
+
+    const element=
+        meta.data[p.index];
+
+    if(!element)
+        return;
+
+    const ctx=chart.ctx;
+
+    const x=element.x;
+    const y=element.y;
+
+    const text=
+        label+
+        ": "+
+        fmt(p.value)+
+        " ("+
+        chart.data.labels[p.index]+
+        ")";
+
+    ctx.save();
+
+    ctx.font="11px Segoe UI";
+
+    const width=
+        ctx.measureText(text).width+12;
+
+    let boxX=x-width/2;
+    let boxY=y-28;
+
+    if(boxX<4)
+        boxX=4;
+
+    if(boxX+width>chart.width-4)
+        boxX=chart.width-width-4;
+
+    if(boxY<4)
+        boxY=y+10;
+
+    ctx.fillStyle="rgba(4,24,38,.94)";
+    ctx.strokeStyle=
+        chart.data.datasets[p.datasetIndex]
+        .borderColor;
+
+    ctx.lineWidth=1;
+
+    ctx.beginPath();
+    ctx.roundRect(
+        boxX,
+        boxY,
+        width,
+        20,
+        5
+    );
+
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle="#eef7ff";
+
+    ctx.fillText(
+        text,
+        boxX+6,
+        boxY+14
+    );
+
+    ctx.restore();
+}
+
+
+/* ==========================================================
+   CHART FACTORY
+========================================================== */
+
+function makeChart(canvasId,isCIO=false){
+
+    return new Chart(
+        document.getElementById(canvasId),
+        {
+            type:"line",
+
+            data:{
+                labels:[],
+                datasets:[
+                    {
+                        label:isCIO
+                            ?"CE negative ΔOI"
+                            :"CE OI",
+
+                        data:[],
+
+                        borderColor:COLORS.cyan,
+
+                        backgroundColor:
+                            COLORS.cyan,
+
+                        borderWidth:2,
+
+                        pointRadius:0,
+
+                        pointHoverRadius:5,
+
+                        tension:0.08,
+
+                        spanGaps:false
+                    },
+
+                    {
+                        label:isCIO
+                            ?"PE negative ΔOI"
+                            :"PE OI",
+
+                        data:[],
+
+                        borderColor:COLORS.pink,
+
+                        backgroundColor:
+                            COLORS.pink,
+
+                        borderWidth:2,
+
+                        pointRadius:0,
+
+                        pointHoverRadius:5,
+
+                        tension:0.08,
+
+                        spanGaps:false
+                    }
+                ]
+            },
+
+            options:{
+
+                responsive:true,
+                maintainAspectRatio:false,
+
+                interaction:{
+                    mode:"index",
+                    intersect:false
+                },
+
+                plugins:{
+
+                    legend:{
+                        labels:{
+                            color:COLORS.text,
+                            boxWidth:14
+                        }
+                    },
+
+                    tooltip:{
+                        enabled:true,
+
+                        callbacks:{
+                            title(items){
+                                return items.length
+                                    ? items[0].label+" IST"
+                                    :"";
+                            },
+
+                            label(ctx){
+                                return (
+                                    ctx.dataset.label+
+                                    ": "+
+                                    fmt(ctx.raw)
+                                );
+                            }
+                        }
+                    }
+                },
+
+                scales:{
+
+                    x:{
+                        grid:{
+                            color:COLORS.grid
+                        },
+
+                        ticks:{
+                            color:COLORS.text,
+                            maxTicksLimit:8
+                        }
+                    },
+
+                    y:{
+                        grid:{
+                            color:COLORS.grid
+                        },
+
+                        suggestedMax:
+                            isCIO ? 0 : undefined,
+
+                        ticks:{
+                            color:COLORS.text,
+
+                            callback:value=>
+                                fmt(value)
+                        }
+                    }
+                }
+            },
+
+            plugins:[
+                peakPlugin
+            ]
+        }
+    );
+}
+
+
+const charts={
+
+    atm:
+        makeChart(
+            "chart-atm"
+        ),
+
+    minus100:
+        makeChart(
+            "chart-minus100"
+        ),
+
+    plus100:
+        makeChart(
+            "chart-plus100"
+        ),
+
+    cio:
+        makeChart(
+            "chart-cio",
+            true
+        )
+};
+
+
+/* ==========================================================
+   RENDER CHART
+========================================================== */
+
+function renderChart(key){
+
+    const chart=charts[key];
+
+    const step=
+        intervals[key];
+
+    const labels=
+        sessionLabels(step);
+
+    const bucket=
+        aggregateSeries(
+            currentData[key],
+            step
+        );
+
+    const ce=[];
+    const pe=[];
+
+    labels.forEach(label=>{
+
+        const p=bucket[label];
+
+        ce.push(
+            p ? Number(p.ce) : null
+        );
+
+        pe.push(
+            p ? Number(p.pe) : null
+        );
+
+    });
+
+    chart.data.labels=labels;
+
+    chart.data.datasets[0].data=ce;
+    chart.data.datasets[1].data=pe;
+
+    chart.update("none");
+
+    renderPeakSummary(
+        key,
+        ce,
+        pe
+    );
+}
+
+
+/* ==========================================================
+   PEAK SUMMARY
+========================================================== */
+
+function renderPeakSummary(key,ce,pe){
+
+    const values=[];
+
+    ce.forEach(v=>{
+        if(v!==null)
+            values.push(v);
+    });
+
+    pe.forEach(v=>{
+        if(v!==null)
+            values.push(v);
+    });
+
+    const el=
+        document.getElementById(
+            "peak-"+key
+        );
+
+    if(!values.length){
+        el.textContent="--";
+        return;
+    }
+
+    const high=Math.max(...values);
+    const low=Math.min(...values);
+
+    if(key==="cio"){
+
+        el.innerHTML=
+            '<span class="pink">Least Neg: '+
+            fmt(high)+
+            '</span> &nbsp;&nbsp;'+
+            '<span class="cyan">Most Neg: '+
+            fmt(low)+
+            '</span>';
+
+    }else{
+
+        el.innerHTML=
+            '<span class="cyan">High: '+
+            fmt(high)+
+            '</span> &nbsp;&nbsp;'+
+            '<span class="pink">Low: '+
+            fmt(low)+
+            '</span>';
+    }
+}
+
+
+/* ==========================================================
+   INTERVAL BUTTONS
+========================================================== */
+
+document.querySelectorAll(
+    ".interval"
+).forEach(btn=>{
+
+    btn.addEventListener(
+        "click",
+        ()=>{
+
+            const key=
+                btn.dataset.card;
+
+            const minutes=
+                Number(
+                    btn.dataset.min
+                );
+
+            intervals[key]=minutes;
+
+            document.querySelectorAll(
+                '.interval[data-card="'+
+                key+
+                '"]'
+            ).forEach(b=>
+                b.classList.remove(
+                    "active"
+                )
+            );
+
+            btn.classList.add(
+                "active"
+            );
+
+            renderChart(key);
+        }
+    );
+
+});
+
+
+/* ==========================================================
+   FULLSCREEN
+========================================================== */
+
+function fullView(id){
+
+    const card=
+        document.getElementById(id);
+
+    if(
+        document.fullscreenElement
+    ){
+        document.exitFullscreen();
+        return;
+    }
+
+    card.requestFullscreen();
+}
+
+
+document.addEventListener(
+    "fullscreenchange",
+    ()=>{
+
+        setTimeout(()=>{
+
+            Object.values(charts)
+                .forEach(c=>c.resize());
+
+        },100);
+
+    }
+);
+
+
+/* ==========================================================
+   THEME
+========================================================== */
+
+function toggleTheme(){
+
+    document.body
+        .classList
+        .toggle("light");
+
+    const light=
+        document.body
+        .classList
+        .contains("light");
+
+    localStorage.setItem(
+        "pratik-theme",
+        light
+            ?"light"
+            :"dark"
+    );
+}
+
+
+if(
+    localStorage.getItem(
+        "pratik-theme"
+    )==="light"
+){
+    document.body
+        .classList
+        .add("light");
+}
+
+
+/* ==========================================================
+   TOP MARKET INFORMATION
+========================================================== */
+
+function renderTop(state){
+
+    const n=
+        state.nifty || {};
+
+    document.getElementById(
+        "niftyPrice"
+    ).textContent=
+        fmt2(n.price);
+
+    document.getElementById(
+        "prevClose"
+    ).textContent=
+        fmt2(n.previous_close);
+
+    document.getElementById(
+        "niftyHigh"
+    ).textContent=
+        fmt2(n.high);
+
+    document.getElementById(
+        "niftyLow"
+    ).textContent=
+        fmt2(n.low);
+
+    const change=
+        Number(n.change);
+
+    const pct=
+        Number(n.change_pct);
+
+    const changeEl=
+        document.getElementById(
+            "niftyChange"
+        );
+
+    const pctEl=
+        document.getElementById(
+            "niftyPct"
+        );
+
+    if(!isNaN(change)){
+
+        changeEl.textContent=
+            (change>=0?"+":"")+
+            fmt2(change);
+
+        pctEl.textContent=
+            (pct>=0?"+":"")+
+            fmt2(pct)+
+            "%";
+
+        const cls=
+            change>=0
+                ?"green"
+                :"red";
+
+        changeEl.className=cls;
+        pctEl.className=cls;
+
+        document.getElementById(
+            "niftyPrice"
+        ).className=
+            "bigValue "+cls;
+    }
+
+
+    const v=
+        state.vix || {};
+
+    document.getElementById(
+        "vixPrice"
+    ).textContent=
+        fmt2(v.price);
+
+    document.getElementById(
+        "vixRange"
+    ).textContent=
+        v.range || "--";
+
+    document.getElementById(
+        "vixInterpretation"
+    ).textContent=
+        v.interpretation || "--";
+
+
+    const z=
+        state.zone || {};
+
+    document.getElementById(
+        "quadrant"
+    ).textContent=
+        z.quadrant || "--";
+
+    document.getElementById(
+        "openingZone"
+    ).textContent=
+        z.zone || "--";
+
+    document.getElementById(
+        "openingPct"
+    ).textContent=
+        z.opening_pct!==null &&
+        z.opening_pct!==undefined
+
+            ?" ("+
+             (z.opening_pct>=0?"+":"")+
+             z.opening_pct+
+             "%)"
+
+            :"";
+
+
+    document.getElementById(
+        "zoneDirection"
+    ).textContent=
+
+        z.quadrant==="Q1"
+            ?"Opening above previous close"
+
+        :z.quadrant==="Q2"
+            ?"Opening below previous close"
+
+        :"Waiting for opening data";
+
+
+    renderLevels(z.levels || {});
+}
+
+
+/* ==========================================================
+   EXACT NIFTY LEVELS
+========================================================== */
+
+function renderLevels(levels){
+
+    if(!levels || !levels["0.00%"]){
+
+        document.getElementById(
+            "exactLevels"
+        ).textContent=
+            "Waiting for previous close...";
+
+        return;
+    }
+
+    const txt=[
+        "-1% "+fmt2(levels["-1.00%"]),
+        "-0.75% "+fmt2(levels["-0.75%"]),
+        "-0.50% "+fmt2(levels["-0.50%"]),
+        "-0.25% "+fmt2(levels["-0.25%"]),
+        "0% "+fmt2(levels["0.00%"]),
+        "+0.25% "+fmt2(levels["+0.25%"]),
+        "+0.50% "+fmt2(levels["+0.50%"]),
+        "+0.75% "+fmt2(levels["+0.75%"]),
+        "+1% "+fmt2(levels["+1.00%"])
+    ];
+
+    document.getElementById(
+        "exactLevels"
+    ).textContent=
+        txt.join(" | ");
+}
+
+
+/* ==========================================================
+   STRIKE TITLES
+========================================================== */
+
+function renderTitles(state){
+
+    const oic=
+        state.oic || {};
+
+    if(oic.atm){
+
+        document.getElementById(
+            "title-atm"
+        ).textContent=
+            "OIC — "+
+            oic.atm+
+            " (ATM)";
+    }
+
+    if(oic.minus100){
+
+        document.getElementById(
+            "title-minus100"
+        ).textContent=
+            "OIC — "+
+            oic.minus100+
+            " (ATM −100)";
+    }
+
+    if(oic.plus100){
+
+        document.getElementById(
+            "title-plus100"
+        ).textContent=
+            "OIC — "+
+            oic.plus100+
+            " (ATM +100)";
+    }
+}
+
+
+/* ==========================================================
+   SESSION INFO
+========================================================== */
+
+function renderSession(state){
+
+    document.getElementById(
+        "sessionDate"
+    ).textContent=
+        state.date || "--";
+
+    document.getElementById(
+        "sessionExpiry"
+    ).textContent=
+        state.expiry || "--";
+
+    document.getElementById(
+        "sessionATM"
+    ).textContent=
+        state.opening_atm || "--";
+}
+
+
+/* ==========================================================
+   LIVE STATE
+========================================================== */
+
+async function loadLive(){
+
+    if(viewingHistory)
+        return;
+
+    try{
+
+        const r=
+            await fetch(
+                "/api/state",
+                {cache:"no-store"}
+            );
+
+        const data=
+            await r.json();
+
+        currentState=data;
+
+        currentData={
+            atm:
+                data.series?.atm || [],
+
+            minus100:
+                data.series?.minus100 || [],
+
+            plus100:
+                data.series?.plus100 || [],
+
+            cio:
+                data.series?.cio || []
+        };
+
+
+        const status=
+            document.getElementById(
+                "connectionStatus"
+            );
+
+        status.textContent=
+            data.connected
+                ?"LIVE — Zerodha connected"
+                :"OFFLINE — Zerodha login required";
+
+        status.style.color=
+            data.connected
+                ?COLORS.green
+                :"#ff7788";
+
+        document.getElementById(
+            "globalMessage"
+        ).textContent=
+            data.message || "";
+
+
+        renderTop(data);
+        renderTitles(data);
+        renderSession(data);
+
+        renderChart("atm");
+        renderChart("minus100");
+        renderChart("plus100");
+        renderChart("cio");
+
+    }catch(e){
+
+        document.getElementById(
+            "globalMessage"
+        ).textContent=
+            "Unable to read live state";
+    }
+}
+
+
+/* ==========================================================
+   HISTORICAL DATES
+========================================================== */
+
+async function loadHistoryDates(){
+
+    try{
+
+        const r=
+            await fetch(
+                "/api/history/dates"
+            );
+
+        const data=
+            await r.json();
+
+        const select=
+            document.getElementById(
+                "historyDate"
+            );
+
+        select.innerHTML="";
+
+        const dates=
+            data.dates || [];
+
+        dates.forEach(day=>{
+
+            const option=
+                document.createElement(
+                    "option"
+                );
+
+            option.value=day;
+            option.textContent=day;
+
+            select.appendChild(option);
+        });
+
+
+        if(dates.length){
+
+            document.getElementById(
+                "firstAvailable"
+            ).textContent=
+                "From: "+
+                dates[
+                    dates.length-1
+                ]+
+                " (First available)";
+        }
+
+    }catch(e){}
+
+}
+
+
+/* ==========================================================
+   LOAD SELECTED HISTORICAL DAY
+========================================================== */
+
+document.getElementById(
+    "historyDate"
+).addEventListener(
+    "change",
+    async function(){
+
+        const day=this.value;
+
+        if(!day)
+            return;
+
+        try{
+
+            const r=
+                await fetch(
+                    "/api/history/"+
+                    day
+                );
+
+            const data=
+                await r.json();
+
+            viewingHistory=true;
+
+            currentData={
+                atm:
+                    data.series?.atm || [],
+
+                minus100:
+                    data.series?.minus100 || [],
+
+                plus100:
+                    data.series?.plus100 || [],
+
+                cio:
+                    data.series?.cio || []
+            };
+
+            renderTop(data);
+            renderTitles(data);
+            renderSession(data);
+
+            renderChart("atm");
+            renderChart("minus100");
+            renderChart("plus100");
+            renderChart("cio");
+
+            document.getElementById(
+                "globalMessage"
+            ).textContent=
+                "Historical session: "+
+                day;
+
+        }catch(e){}
+
+    }
+);
+
+
+/* ==========================================================
+   CIO EXCEL DOWNLOAD
+   Backend route will be added next.
+========================================================== */
+
+function downloadCIO(){
+
+    const select=
+        document.getElementById(
+            "historyDate"
+        );
+
+    const day=
+        select.value ||
+        currentState?.date;
+
+    if(!day){
+
+        alert(
+            "No stored CIO date available."
+        );
+
+        return;
+    }
+
+    window.location.href=
+        "/api/export/cio/"+
+        day;
+}
+
+
+/* ==========================================================
+   INITIAL LOAD
+========================================================== */
+
+loadHistoryDates();
+loadLive();
+
+setInterval(
+    loadLive,
+    5000
+);
+
 </script>
+
 </body>
 </html>
