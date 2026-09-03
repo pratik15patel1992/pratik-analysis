@@ -1,0 +1,75 @@
+
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pratik Analysis — Live OI</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font-family:Segoe UI,Arial,sans-serif;background:#06111d;color:#eef7ff;overflow:hidden}
+header{height:58px;background:#0b1b2c;border-bottom:1px solid #24445d;padding:9px 14px;display:flex;align-items:center;justify-content:space-between}
+.brand{font-size:21px;font-weight:800}.brand b{color:#8be9fd}
+.sub{font-size:10px;color:#8ea7bf;margin-top:2px}
+.right{display:flex;align-items:center;gap:12px}.status{font-size:11px;font-weight:700}.ok{color:#54e6a3}.bad{color:#ff9aaa}
+.btn{display:inline-block;background:#4cc9f0;color:#03111c;text-decoration:none;font-weight:800;border-radius:8px;padding:8px 11px;font-size:11px}
+main{height:calc(100vh - 58px);padding:9px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:9px}
+.card{min-height:0;background:#0b1b2c;border:1px solid #24445d;border-radius:11px;padding:8px;display:flex;flex-direction:column}
+.h{display:flex;justify-content:space-between;align-items:center}.title{font-weight:800;font-size:13px}.tag{font-size:9px;color:#8be9fd}
+.desc{font-size:9px;color:#8ea7bf;margin:2px 0 4px}.chart{position:relative;flex:1;min-height:0}.chart canvas{position:absolute;inset:0;width:100%!important;height:100%!important}
+.overlay{position:fixed;inset:0;background:#06111def;display:grid;place-items:center;z-index:10}
+.box{width:min(650px,92vw);padding:24px;background:#0b1b2c;border:1px solid #315574;border-radius:14px;line-height:1.55}
+code{background:#06111d;padding:2px 5px;border-radius:4px}
+@media(max-width:800px){body{overflow:auto}main{height:auto;grid-template-columns:1fr;grid-template-rows:repeat(4,300px)}}
+</style>
+</head>
+<body>
+{% if not configured %}
+<div class="overlay"><div class="box">
+<h2>Cloud configuration required</h2>
+<p>Add <code>KITE_API_KEY</code>, <code>KITE_API_SECRET</code>, <code>APP_SECRET</code> and <code>PUBLIC_BASE_URL</code> in your Render Environment settings.</p>
+<p>After Render gives you the final URL, set Zerodha Redirect URL to:<br><code>https://YOUR-RENDER-URL/kite/callback</code></p>
+</div></div>
+{% endif %}
+<header>
+<div><div class="brand">Pratik Analysis <b>LIVE OI</b></div><div class="sub">OIC + CIO • NIFTY option open-interest analysis</div></div>
+<div class="right"><span id="status" class="status bad">Waiting…</span><a class="btn" href="/kite/login">LOGIN WITH ZERODHA</a></div>
+</header>
+<main>
+<div class="card"><div class="h"><span id="atmTitle" class="title">OIC — ATM</span><span class="tag">OIC</span></div><div class="desc">Opening ATM locked for session • CE OI vs PE OI</div><div class="chart"><canvas id="atm"></canvas></div></div>
+<div class="card"><div class="h"><span id="minusTitle" class="title">OIC — ATM −100</span><span class="tag">OIC</span></div><div class="desc">Opening ATM −100 locked for session • CE OI vs PE OI</div><div class="chart"><canvas id="minus"></canvas></div></div>
+<div class="card"><div class="h"><span id="plusTitle" class="title">OIC — ATM +100</span><span class="tag">OIC</span></div><div class="desc">Opening ATM +100 locked for session • CE OI vs PE OI</div><div class="chart"><canvas id="plus"></canvas></div></div>
+<div class="card"><div class="h"><span class="title">CIO — Negative Change in OI</span><span class="tag">CIO</span></div><div id="cioDesc" class="desc">All nearest-expiry NIFTY strikes • negative ΔOI summed separately for CE and PE</div><div class="chart"><canvas id="cio"></canvas></div></div>
+</main>
+<script>
+Chart.defaults.color="#8ea7bf";Chart.defaults.borderColor="#234660";Chart.defaults.animation=false;
+function mk(id,l1,l2){
+ return new Chart(document.getElementById(id),{type:"line",data:{labels:[],datasets:[
+  {label:l1,data:[],borderColor:"#4cc9f0",borderWidth:2,pointRadius:0},
+  {label:l2,data:[],borderColor:"#f72585",borderWidth:2,pointRadius:0}
+ ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{boxWidth:12,font:{size:9}}}},
+ scales:{x:{ticks:{maxTicksLimit:7,font:{size:8}}},y:{ticks:{font:{size:8}}}}}})
+}
+const a=mk("atm","CE OI","PE OI"),m=mk("minus","CE OI","PE OI"),p=mk("plus","CE OI","PE OI"),c=mk("cio","CE negative ΔOI","PE negative ΔOI");
+function set2(ch,arr){
+ ch.data.labels=arr.map(x=>x.t); ch.data.datasets[0].data=arr.map(x=>x.ce); ch.data.datasets[1].data=arr.map(x=>x.pe); ch.update("none");
+}
+async function refresh(){
+ try{
+  const s=await (await fetch("/api/state",{cache:"no-store"})).json();
+  const st=document.getElementById("status"); st.textContent=s.message; st.className="status "+(s.connected?"ok":"bad");
+  document.getElementById("atmTitle").textContent=`OIC — ${s.oic.atm??"ATM"}`;
+  document.getElementById("minusTitle").textContent=`OIC — ${s.oic.minus100??"ATM −100"}`;
+  document.getElementById("plusTitle").textContent=`OIC — ${s.oic.plus100??"ATM +100"}`;
+  document.getElementById("cioDesc").textContent=s.cio.baseline_ready
+   ? "All nearest-expiry NIFTY strikes • only negative Change in OI is summed separately"
+   : "Preparing previous-day OI baseline for CIO…";
+  set2(a,s.oic.series.atm||[]);set2(m,s.oic.series.minus100||[]);set2(p,s.oic.series.plus100||[]);set2(c,s.cio.series||[]);
+ }catch(e){}
+}
+setInterval(refresh,1000);refresh();
+</script>
+</body>
+</html>

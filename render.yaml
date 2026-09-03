@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: pratik-analysis
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers 1 --threads 4 --timeout 120 app:app
+    healthCheckPath: /health
+    envVars:
+      - key: KITE_API_KEY
+        sync: false
+      - key: KITE_API_SECRET
+        sync: false
+      - key: APP_SECRET
+        generateValue: true
+      - key: PUBLIC_BASE_URL
+        sync: false
