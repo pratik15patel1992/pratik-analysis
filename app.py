@@ -2023,6 +2023,24 @@ def api_history_cio(day):
 @app.route("/api/download/cio/<day>")
 def download_cio_excel(day):
 
+    # For today, export directly from live in-memory CIO data
+if day == today_key():
+
+    with lock:
+        data = {
+            "date": state.get("date"),
+            "expiry": state.get("expiry"),
+            "opening_atm": state.get("opening_atm"),
+            "series": {
+                "cio": list(
+                    state.get("series", {}).get("cio", [])
+                )
+            }
+        }
+
+# For previous dates, use stored history
+else:
+
     path = history_file(day)
 
     if not path.exists():
@@ -2031,7 +2049,8 @@ def download_cio_excel(day):
         }), 404
 
     data = load_day_history(day)
-    cio_data = data.get("series", {}).get("cio", [])
+
+cio_data = data.get("series", {}).get("cio", [])
 
     if not cio_data:
         return jsonify({
