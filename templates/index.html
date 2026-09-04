@@ -1,44 +1,1151 @@
-function downloadCIO() {
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Pratik Analysis LIVE OI</title>
 
-    const select =
-        document.getElementById("historyDate");
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 
-    let day = null;
+    <style>
+        :root{
+            --bg:#06111d;
+            --panel:#0b1b2b;
+            --panel2:#0e2235;
+            --border:#25465d;
+            --text:#f4f8fb;
+            --muted:#8fa9bb;
+            --cyan:#35c7ff;
+            --pink:#ff5fa2;
+            --green:#44df8d;
+            --yellow:#ffc857;
+            --purple:#9c7cff;
+            --red:#ff6b6b;
+            --shadow:0 10px 26px rgba(0,0,0,.20);
+        }
 
-    if (select && select.value) {
-        day = select.value;
+        body.light{
+            --bg:#eef4f8;
+            --panel:#ffffff;
+            --panel2:#f7fafc;
+            --border:#cad8e2;
+            --text:#14202b;
+            --muted:#617384;
+            --shadow:0 10px 26px rgba(18,45,68,.10);
+        }
+
+        *{box-sizing:border-box}
+
+        html,body{
+            margin:0;
+            min-height:100%;
+            font-family:Inter,Segoe UI,Arial,sans-serif;
+            background:var(--bg);
+            color:var(--text);
+        }
+
+        body{
+            padding:12px;
+        }
+
+        .app{
+            max-width:1800px;
+            margin:0 auto;
+        }
+
+        .header{
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:16px;
+            padding:14px 16px;
+            border:1px solid var(--border);
+            background:var(--panel);
+            border-radius:16px;
+            box-shadow:var(--shadow);
+            margin-bottom:12px;
+        }
+
+        .brand h1{
+            margin:0;
+            font-size:27px;
+            letter-spacing:.2px;
+        }
+
+        .brand h1 span{color:var(--cyan)}
+
+        .brand .sub{
+            margin-top:4px;
+            color:var(--muted);
+            font-size:13px;
+        }
+
+        .headerRight{
+            display:flex;
+            align-items:center;
+            justify-content:flex-end;
+            gap:8px;
+            flex-wrap:wrap;
+        }
+
+        .status{
+            min-width:200px;
+            padding:9px 12px;
+            border:1px solid var(--border);
+            border-radius:12px;
+            background:var(--panel2);
+        }
+
+        .status strong{
+            display:block;
+            color:var(--green);
+            font-size:13px;
+        }
+
+        .status small{
+            color:var(--muted);
+            font-size:11px;
+        }
+
+        button,a.btn,select{
+            font:inherit;
+        }
+
+        button,a.btn{
+            cursor:pointer;
+            border:1px solid var(--border);
+            background:var(--panel2);
+            color:var(--text);
+            border-radius:10px;
+            padding:9px 12px;
+            text-decoration:none;
+            transition:.15s ease;
+        }
+
+        button:hover,a.btn:hover{
+            transform:translateY(-1px);
+            border-color:var(--cyan);
+        }
+
+        .loginBtn{
+            border-color:rgba(68,223,141,.45)!important;
+            color:var(--green)!important;
+        }
+
+        .logoutBtn{
+            border-color:rgba(255,107,107,.40)!important;
+            color:var(--red)!important;
+        }
+
+        .topGrid{
+            display:grid;
+            grid-template-columns:1.2fr .9fr .8fr 2fr;
+            gap:10px;
+            margin-bottom:10px;
+        }
+
+        .card{
+            background:var(--panel);
+            border:1px solid var(--border);
+            border-radius:14px;
+            padding:13px;
+            box-shadow:var(--shadow);
+            min-width:0;
+        }
+
+        .cardTitle{
+            font-size:12px;
+            color:var(--muted);
+            text-transform:uppercase;
+            letter-spacing:.8px;
+            margin-bottom:7px;
+        }
+
+        .big{
+            font-size:27px;
+            font-weight:800;
+            line-height:1.1;
+        }
+
+        .positive{color:var(--green)}
+        .negative{color:var(--red)}
+        .cyan{color:var(--cyan)}
+        .pink{color:var(--pink)}
+        .yellow{color:var(--yellow)}
+        .purple{color:var(--purple)}
+
+        .mini{
+            color:var(--muted);
+            font-size:12px;
+            margin-top:7px;
+            line-height:1.5;
+        }
+
+        .levels{
+            display:grid;
+            grid-template-columns:repeat(5,1fr);
+            gap:6px;
+        }
+
+        .level{
+            background:var(--panel2);
+            border:1px solid var(--border);
+            border-radius:10px;
+            padding:8px;
+            text-align:center;
+            overflow:hidden;
+        }
+
+        .level b{
+            display:block;
+            font-size:12px;
+            color:var(--muted);
+        }
+
+        .level span{
+            display:block;
+            margin-top:3px;
+            font-size:13px;
+            font-weight:700;
+            white-space:nowrap;
+        }
+
+        .toolbar{
+            display:flex;
+            gap:8px;
+            align-items:center;
+            flex-wrap:wrap;
+            background:var(--panel);
+            border:1px solid var(--border);
+            border-radius:14px;
+            padding:10px 12px;
+            margin-bottom:10px;
+        }
+
+        .toolbar label{
+            font-size:12px;
+            color:var(--muted);
+        }
+
+        select{
+            color:var(--text);
+            background:var(--panel2);
+            border:1px solid var(--border);
+            border-radius:9px;
+            padding:8px 10px;
+            min-width:170px;
+        }
+
+        .liveChip{
+            padding:7px 10px;
+            border-radius:9px;
+            border:1px solid rgba(68,223,141,.35);
+            color:var(--green);
+            background:rgba(68,223,141,.08);
+            font-size:12px;
+        }
+
+        .charts{
+            display:grid;
+            grid-template-columns:1fr 1fr;
+            gap:10px;
+        }
+
+        .chartCard{
+            background:var(--panel);
+            border:1px solid var(--border);
+            border-radius:14px;
+            padding:12px;
+            box-shadow:var(--shadow);
+            min-height:330px;
+            position:relative;
+        }
+
+        .chartHeader{
+            display:flex;
+            align-items:flex-start;
+            justify-content:space-between;
+            gap:10px;
+            margin-bottom:8px;
+        }
+
+        .chartHeader h3{
+            margin:0;
+            font-size:15px;
+        }
+
+        .chartHeader p{
+            margin:4px 0 0;
+            color:var(--muted);
+            font-size:11px;
+        }
+
+        .chartControls{
+            display:flex;
+            gap:5px;
+            align-items:center;
+            flex-wrap:wrap;
+            justify-content:flex-end;
+        }
+
+        .chartControls button{
+            padding:5px 8px;
+            font-size:11px;
+            border-radius:8px;
+        }
+
+        .chartControls button.active{
+            background:var(--purple);
+            color:white;
+            border-color:var(--purple);
+        }
+
+        .chartBox{
+            position:relative;
+            height:245px;
+        }
+
+        .chartStats{
+            display:flex;
+            justify-content:space-between;
+            gap:8px;
+            color:var(--muted);
+            font-size:11px;
+            margin-top:8px;
+            flex-wrap:wrap;
+        }
+
+        .footerGrid{
+            display:grid;
+            grid-template-columns:1.2fr 1fr;
+            gap:10px;
+            margin-top:10px;
+        }
+
+        .downloadBox{
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:16px;
+        }
+
+        .downloadText h3{
+            margin:0 0 4px;
+            font-size:16px;
+        }
+
+        .downloadText p{
+            margin:0;
+            color:var(--muted);
+            font-size:12px;
+        }
+
+        .downloadBtn{
+            min-width:190px;
+            background:rgba(68,223,141,.10);
+            border-color:rgba(68,223,141,.55);
+            color:var(--green);
+            font-weight:800;
+        }
+
+        .sessionInfo{
+            display:grid;
+            grid-template-columns:repeat(4,1fr);
+            gap:7px;
+        }
+
+        .sessionInfo div{
+            background:var(--panel2);
+            border:1px solid var(--border);
+            border-radius:9px;
+            padding:8px;
+        }
+
+        .sessionInfo b{
+            display:block;
+            color:var(--muted);
+            font-size:10px;
+            text-transform:uppercase;
+            letter-spacing:.6px;
+        }
+
+        .sessionInfo span{
+            display:block;
+            margin-top:4px;
+            font-size:12px;
+            font-weight:700;
+        }
+
+        .notice{
+            padding:12px;
+            margin-top:10px;
+            background:var(--panel);
+            border:1px solid var(--border);
+            border-radius:12px;
+            color:var(--muted);
+            font-size:11px;
+            text-align:center;
+        }
+
+        .empty{
+            position:absolute;
+            inset:55px 10px 10px;
+            display:none;
+            align-items:center;
+            justify-content:center;
+            color:var(--muted);
+            font-size:13px;
+            pointer-events:none;
+        }
+
+        .chartCard.full{
+            position:fixed;
+            inset:10px;
+            z-index:9999;
+            min-height:0;
+            background:var(--panel);
+        }
+
+        .chartCard.full .chartBox{
+            height:calc(100vh - 120px);
+        }
+
+        @media(max-width:1100px){
+            .topGrid{grid-template-columns:1fr 1fr}
+            .charts{grid-template-columns:1fr}
+            .footerGrid{grid-template-columns:1fr}
+        }
+
+        @media(max-width:650px){
+            body{padding:7px}
+            .header{align-items:flex-start;flex-direction:column}
+            .headerRight{justify-content:flex-start}
+            .topGrid{grid-template-columns:1fr}
+            .levels{grid-template-columns:repeat(3,1fr)}
+            .chartCard{min-height:310px}
+            .chartBox{height:230px}
+            .downloadBox{align-items:flex-start;flex-direction:column}
+            .downloadBtn{width:100%}
+            .sessionInfo{grid-template-columns:1fr 1fr}
+        }
+    </style>
+</head>
+
+<body>
+<div class="app">
+
+    <header class="header">
+        <div class="brand">
+            <h1>Pratik Analysis <span>LIVE OI</span></h1>
+            <div class="sub">OIC + CIO • NIFTY option open-interest analysis</div>
+        </div>
+
+        <div class="headerRight">
+            <div class="status">
+                <strong id="connectionStatus">Waiting for Zerodha login</strong>
+                <small id="lastUpdate">Last update: —</small>
+            </div>
+
+            {% if configured %}
+            <a class="btn loginBtn" href="/kite/login">LOGIN WITH ZERODHA</a>
+            <a class="btn logoutBtn" href="/kite/logout">LOGOUT</a>
+            {% else %}
+            <span class="btn">Kite credentials not configured</span>
+            {% endif %}
+
+            <button id="themeBtn" type="button" onclick="toggleTheme()">☀ / ☾</button>
+        </div>
+    </header>
+
+    <section class="topGrid">
+        <div class="card">
+            <div class="cardTitle">NIFTY 50 (Spot)</div>
+            <div class="big" id="niftyPrice">—</div>
+            <div id="niftyChange" class="mini">Change: —</div>
+            <div id="niftyStats" class="mini">Prev Close: — • High: — • Low: —</div>
+        </div>
+
+        <div class="card">
+            <div class="cardTitle">India VIX</div>
+            <div class="big cyan" id="vixPrice">—</div>
+            <div id="vixRange" class="mini">Range: —</div>
+            <div id="vixInterpretation" class="mini">—</div>
+        </div>
+
+        <div class="card">
+            <div class="cardTitle">Opening Zone</div>
+            <div class="big purple" id="zoneName">—</div>
+            <div id="zonePct" class="mini">Opening gap: —</div>
+            <div id="openingAtmText" class="mini">Opening ATM: —</div>
+        </div>
+
+        <div class="card">
+            <div class="cardTitle">Our Levels (From Previous Close 0%)</div>
+            <div class="levels" id="levelsGrid">
+                <div class="level"><b>-1.00%</b><span>—</span></div>
+                <div class="level"><b>-0.75%</b><span>—</span></div>
+                <div class="level"><b>-0.50%</b><span>—</span></div>
+                <div class="level"><b>-0.25%</b><span>—</span></div>
+                <div class="level"><b>0.00%</b><span>—</span></div>
+                <div class="level"><b>+0.25%</b><span>—</span></div>
+                <div class="level"><b>+0.50%</b><span>—</span></div>
+                <div class="level"><b>+0.75%</b><span>—</span></div>
+                <div class="level"><b>+1.00%</b><span>—</span></div>
+            </div>
+        </div>
+    </section>
+
+    <div class="toolbar">
+        <label for="historyDate">Session:</label>
+        <select id="historyDate" onchange="onSessionChange()">
+            <option value="">Loading dates...</option>
+        </select>
+
+        <button type="button" onclick="showLiveToday()">Live Today</button>
+        <span id="modeChip" class="liveChip">LIVE VIEW</span>
+        <span id="sessionMessage" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+
+    <section class="charts">
+
+        <article class="chartCard" id="card-atm">
+            <div class="chartHeader">
+                <div>
+                    <h3 id="title-atm">OIC — ATM</h3>
+                    <p>Opening ATM locked for session • CE OI vs PE OI</p>
+                </div>
+                <div class="chartControls">
+                    <button onclick="fullView('card-atm')">Full View</button>
+                    <button class="active" data-group="atm" data-min="1" onclick="setIntervalView('atm',1,this)">1m</button>
+                    <button data-group="atm" data-min="3" onclick="setIntervalView('atm',3,this)">3m</button>
+                    <button data-group="atm" data-min="5" onclick="setIntervalView('atm',5,this)">5m</button>
+                    <button data-group="atm" data-min="15" onclick="setIntervalView('atm',15,this)">15m</button>
+                </div>
+            </div>
+            <div class="chartBox"><canvas id="chart-atm"></canvas></div>
+            <div class="empty" id="empty-atm">No OIC data available for this session yet.</div>
+            <div class="chartStats" id="stats-atm"></div>
+        </article>
+
+        <article class="chartCard" id="card-minus100">
+            <div class="chartHeader">
+                <div>
+                    <h3 id="title-minus100">OIC — ATM -100</h3>
+                    <p>Opening ATM -100 locked for session • CE OI vs PE OI</p>
+                </div>
+                <div class="chartControls">
+                    <button onclick="fullView('card-minus100')">Full View</button>
+                    <button class="active" data-group="minus100" data-min="1" onclick="setIntervalView('minus100',1,this)">1m</button>
+                    <button data-group="minus100" data-min="3" onclick="setIntervalView('minus100',3,this)">3m</button>
+                    <button data-group="minus100" data-min="5" onclick="setIntervalView('minus100',5,this)">5m</button>
+                    <button data-group="minus100" data-min="15" onclick="setIntervalView('minus100',15,this)">15m</button>
+                </div>
+            </div>
+            <div class="chartBox"><canvas id="chart-minus100"></canvas></div>
+            <div class="empty" id="empty-minus100">No OIC data available for this session yet.</div>
+            <div class="chartStats" id="stats-minus100"></div>
+        </article>
+
+        <article class="chartCard" id="card-plus100">
+            <div class="chartHeader">
+                <div>
+                    <h3 id="title-plus100">OIC — ATM +100</h3>
+                    <p>Opening ATM +100 locked for session • CE OI vs PE OI</p>
+                </div>
+                <div class="chartControls">
+                    <button onclick="fullView('card-plus100')">Full View</button>
+                    <button class="active" data-group="plus100" data-min="1" onclick="setIntervalView('plus100',1,this)">1m</button>
+                    <button data-group="plus100" data-min="3" onclick="setIntervalView('plus100',3,this)">3m</button>
+                    <button data-group="plus100" data-min="5" onclick="setIntervalView('plus100',5,this)">5m</button>
+                    <button data-group="plus100" data-min="15" onclick="setIntervalView('plus100',15,this)">15m</button>
+                </div>
+            </div>
+            <div class="chartBox"><canvas id="chart-plus100"></canvas></div>
+            <div class="empty" id="empty-plus100">No OIC data available for this session yet.</div>
+            <div class="chartStats" id="stats-plus100"></div>
+        </article>
+
+        <article class="chartCard" id="card-cio">
+            <div class="chartHeader">
+                <div>
+                    <h3>CIO — Negative Change in OI</h3>
+                    <p>All nearest-expiry NIFTY strikes • only negative Change in OI is summed separately</p>
+                </div>
+                <div class="chartControls">
+                    <button onclick="fullView('card-cio')">Full View</button>
+                    <button class="active" data-group="cio" data-min="1" onclick="setIntervalView('cio',1,this)">1m</button>
+                    <button data-group="cio" data-min="3" onclick="setIntervalView('cio',3,this)">3m</button>
+                    <button data-group="cio" data-min="5" onclick="setIntervalView('cio',5,this)">5m</button>
+                    <button data-group="cio" data-min="15" onclick="setIntervalView('cio',15,this)">15m</button>
+                </div>
+            </div>
+            <div class="chartBox"><canvas id="chart-cio"></canvas></div>
+            <div class="empty" id="empty-cio">CIO baseline/data is not available yet.</div>
+            <div class="chartStats" id="stats-cio"></div>
+        </article>
+
+    </section>
+
+    <section class="footerGrid">
+        <div class="card downloadBox">
+            <div class="downloadText">
+                <h3>Download CIO Data (Excel)</h3>
+                <p>Selected session • minute-wise CE/PE negative Change in OI • Excel chart included</p>
+            </div>
+            <button class="downloadBtn" type="button" onclick="downloadCIO()">
+                Download CIO Excel<br>
+                <small>(Includes Chart)</small>
+            </button>
+        </div>
+
+        <div class="card">
+            <div class="cardTitle">Session Info</div>
+            <div class="sessionInfo">
+                <div><b>Date</b><span id="infoDate">—</span></div>
+                <div><b>Expiry</b><span id="infoExpiry">—</span></div>
+                <div><b>Opening ATM</b><span id="infoAtm">—</span></div>
+                <div><b>Data Points</b><span id="infoPoints">—</span></div>
+            </div>
+        </div>
+    </section>
+
+    <div class="notice">
+        CIO chart correction: <b>Time is on the X-axis</b> and <b>Negative Change in OI is on the Y-axis</b>.
+        Historical sessions are loaded from permanent Neon storage when available.
+    </div>
+
+</div>
+
+<script>
+let currentState = null;
+let displayedState = null;
+let liveMode = true;
+
+const selectedIntervals = {
+    atm: 1,
+    minus100: 1,
+    plus100: 1,
+    cio: 1
+};
+
+const charts = {};
+
+const chartColors = {
+    ce: "#35c7ff",
+    pe: "#ff5fa2",
+    grid: "rgba(130,160,180,.18)",
+    text: "#8fa9bb"
+};
+
+function indianNumber(value){
+    if(value === null || value === undefined || value === "") return "—";
+    const n = Number(value);
+    if(!Number.isFinite(n)) return "—";
+    return new Intl.NumberFormat("en-IN", {maximumFractionDigits: 2}).format(n);
+}
+
+function signed(value, digits=2){
+    if(value === null || value === undefined) return "—";
+    const n = Number(value);
+    if(!Number.isFinite(n)) return "—";
+    return `${n >= 0 ? "+" : ""}${n.toFixed(digits)}`;
+}
+
+function formatTimeStamp(iso){
+    if(!iso) return "—";
+    const d = new Date(iso);
+    if(Number.isNaN(d.getTime())) return "—";
+    return d.toLocaleTimeString("en-IN", {
+        hour:"2-digit",
+        minute:"2-digit",
+        second:"2-digit",
+        hour12:true
+    });
+}
+
+function safeSeries(state, key){
+    return state?.series?.[key] && Array.isArray(state.series[key])
+        ? state.series[key]
+        : [];
+}
+
+function aggregateSeries(series, minutes){
+    if(minutes <= 1) return series.slice();
+
+    const result = [];
+    let bucket = null;
+
+    for(const p of series){
+        const parts = String(p.time || "").split(":");
+        if(parts.length !== 2) continue;
+
+        const hh = Number(parts[0]);
+        const mm = Number(parts[1]);
+        if(!Number.isFinite(hh) || !Number.isFinite(mm)) continue;
+
+        const total = hh * 60 + mm;
+        const bucketStart = Math.floor(total / minutes) * minutes;
+        const bucketKey = bucketStart;
+
+        if(!bucket || bucket.key !== bucketKey){
+            if(bucket) result.push(bucket.point);
+            bucket = {
+                key: bucketKey,
+                point: {...p}
+            };
+        }else{
+            bucket.point = {...p};
+        }
     }
-    else if (
-        typeof currentState !== "undefined" &&
-        currentState &&
-        currentState.date
-    ) {
-        day = currentState.date;
+
+    if(bucket) result.push(bucket.point);
+    return result;
+}
+
+function chartOptions(isCio=false){
+    const bodyIsLight = document.body.classList.contains("light");
+    const textColor = bodyIsLight ? "#617384" : "#8fa9bb";
+    const gridColor = bodyIsLight ? "rgba(80,110,130,.12)" : "rgba(130,160,180,.18)";
+
+    return {
+        responsive:true,
+        maintainAspectRatio:false,
+        animation:false,
+        interaction:{
+            mode:"index",
+            intersect:false
+        },
+        plugins:{
+            legend:{
+                labels:{
+                    color:textColor,
+                    usePointStyle:true,
+                    boxWidth:8
+                }
+            },
+            tooltip:{
+                callbacks:{
+                    label:function(ctx){
+                        return `${ctx.dataset.label}: ${indianNumber(ctx.raw)}`;
+                    }
+                }
+            }
+        },
+        scales:{
+            x:{
+                ticks:{
+                    color:textColor,
+                    maxTicksLimit:10
+                },
+                grid:{color:gridColor},
+                title:{
+                    display:true,
+                    text:"Time",
+                    color:textColor
+                }
+            },
+            y:{
+                beginAtZero:false,
+                max:isCio ? 0 : undefined,
+                ticks:{
+                    color:textColor,
+                    callback:(v)=>indianNumber(v)
+                },
+                grid:{color:gridColor},
+                title:{
+                    display:true,
+                    text:isCio ? "Negative Change in OI" : "Open Interest",
+                    color:textColor
+                }
+            }
+        }
+    };
+}
+
+function makeChart(canvasId, isCio=false){
+    const ctx = document.getElementById(canvasId);
+    return new Chart(ctx, {
+        type:"line",
+        data:{
+            labels:[],
+            datasets:[
+                {
+                    label:isCio ? "CE Negative Change in OI" : "CE OI",
+                    data:[],
+                    borderColor:chartColors.ce,
+                    backgroundColor:chartColors.ce,
+                    borderWidth:2,
+                    pointRadius:0,
+                    pointHoverRadius:4,
+                    tension:.18
+                },
+                {
+                    label:isCio ? "PE Negative Change in OI" : "PE OI",
+                    data:[],
+                    borderColor:chartColors.pe,
+                    backgroundColor:chartColors.pe,
+                    borderWidth:2,
+                    pointRadius:0,
+                    pointHoverRadius:4,
+                    tension:.18
+                }
+            ]
+        },
+        options:chartOptions(isCio)
+    });
+}
+
+function initCharts(){
+    charts.atm = makeChart("chart-atm");
+    charts.minus100 = makeChart("chart-minus100");
+    charts.plus100 = makeChart("chart-plus100");
+    charts.cio = makeChart("chart-cio", true);
+}
+
+function updateChart(key, state){
+    const raw = safeSeries(state, key);
+    const series = aggregateSeries(raw, selectedIntervals[key]);
+
+    const chart = charts[key];
+    chart.data.labels = series.map(p => p.time || "");
+    chart.data.datasets[0].data = series.map(p => Number(p.ce));
+    chart.data.datasets[1].data = series.map(p => Number(p.pe));
+
+    chart.options = chartOptions(key === "cio");
+    chart.update("none");
+
+    const empty = document.getElementById(`empty-${key}`);
+    empty.style.display = raw.length ? "none" : "flex";
+
+    updateStats(key, raw);
+}
+
+function extremeInfo(series, field){
+    const valid = series
+        .map(p => ({time:p.time, value:Number(p[field])}))
+        .filter(p => Number.isFinite(p.value));
+
+    if(!valid.length) return null;
+
+    let max = valid[0];
+    let min = valid[0];
+
+    for(const p of valid){
+        if(p.value > max.value) max = p;
+        if(p.value < min.value) min = p;
     }
 
-    if (!day) {
-        alert(
-            "No CIO date available for download."
-        );
+    return {max,min};
+}
+
+function updateStats(key, raw){
+    const box = document.getElementById(`stats-${key}`);
+
+    if(!raw.length){
+        box.innerHTML = "<span>Day Range: no data</span>";
         return;
     }
 
-    const downloadUrl =
-        "/api/download/cio/" +
-        encodeURIComponent(day);
+    const ce = extremeInfo(raw, "ce");
+    const pe = extremeInfo(raw, "pe");
 
-    const link =
-        document.createElement("a");
-
-    link.href = downloadUrl;
-    link.download =
-        "Pratik_Analysis_CIO_" +
-        day +
-        ".xlsx";
-
-    document.body.appendChild(link);
-
-    link.click();
-
-    document.body.removeChild(link);
+    if(key === "cio"){
+        box.innerHTML = `
+            <span>Day Range: ${raw[0]?.time || "—"} – ${raw[raw.length-1]?.time || "—"}</span>
+            <span class="cyan">CE least neg: ${indianNumber(ce?.max?.value)} • most neg: ${indianNumber(ce?.min?.value)}</span>
+            <span class="pink">PE least neg: ${indianNumber(pe?.max?.value)} • most neg: ${indianNumber(pe?.min?.value)}</span>
+        `;
+    }else{
+        box.innerHTML = `
+            <span>Day Range: ${raw[0]?.time || "—"} – ${raw[raw.length-1]?.time || "—"}</span>
+            <span class="cyan">CE high: ${indianNumber(ce?.max?.value)} • low: ${indianNumber(ce?.min?.value)}</span>
+            <span class="pink">PE high: ${indianNumber(pe?.max?.value)} • low: ${indianNumber(pe?.min?.value)}</span>
+        `;
+    }
 }
+
+function updateTop(state){
+    const n = state?.nifty || {};
+    const v = state?.vix || {};
+    const z = state?.zone || {};
+
+    document.getElementById("niftyPrice").textContent = indianNumber(n.price);
+
+    const ch = Number(n.change);
+    const cp = Number(n.change_pct);
+    const chEl = document.getElementById("niftyChange");
+
+    if(Number.isFinite(ch) && Number.isFinite(cp)){
+        chEl.textContent = `Change: ${signed(ch,2)} (${signed(cp,3)}%)`;
+        chEl.className = "mini " + (ch >= 0 ? "positive" : "negative");
+    }else{
+        chEl.textContent = "Change: —";
+        chEl.className = "mini";
+    }
+
+    document.getElementById("niftyStats").textContent =
+        `Prev Close: ${indianNumber(n.previous_close)} • High: ${indianNumber(n.high)} • Low: ${indianNumber(n.low)}`;
+
+    document.getElementById("vixPrice").textContent = indianNumber(v.price);
+    document.getElementById("vixRange").textContent = `Range: ${v.range || "—"}`;
+    document.getElementById("vixInterpretation").textContent = v.interpretation || "—";
+
+    const q = z.quadrant || "—";
+    const zone = z.zone || "—";
+    document.getElementById("zoneName").textContent = `${q} / ${zone}`;
+    document.getElementById("zonePct").textContent =
+        z.opening_pct === null || z.opening_pct === undefined
+            ? "Opening gap: —"
+            : `Opening gap: ${signed(Number(z.opening_pct),3)}%`;
+
+    document.getElementById("openingAtmText").textContent =
+        `Opening ATM: ${state?.opening_atm ?? "—"}`;
+
+    const levels = z.levels || {};
+    const grid = document.getElementById("levelsGrid");
+    const labels = ["-1.00%","-0.75%","-0.50%","-0.25%","0.00%","+0.25%","+0.50%","+0.75%","+1.00%"];
+    grid.innerHTML = labels.map(k => `
+        <div class="level">
+            <b>${k}</b>
+            <span>${indianNumber(levels[k])}</span>
+        </div>
+    `).join("");
+}
+
+function updateTitles(state){
+    const atm = state?.opening_atm;
+    document.getElementById("title-atm").textContent =
+        `OIC — ${atm ?? "ATM"} (ATM)`;
+    document.getElementById("title-minus100").textContent =
+        `OIC — ${atm ? atm - 100 : "ATM -100"} (ATM -100)`;
+    document.getElementById("title-plus100").textContent =
+        `OIC — ${atm ? atm + 100 : "ATM +100"} (ATM +100)`;
+}
+
+function updateSessionInfo(state){
+    document.getElementById("infoDate").textContent = state?.date || "—";
+    document.getElementById("infoExpiry").textContent = state?.expiry || "—";
+    document.getElementById("infoAtm").textContent = state?.opening_atm || "—";
+    document.getElementById("infoPoints").textContent = safeSeries(state,"cio").length;
+}
+
+function renderState(state){
+    displayedState = state;
+    updateTop(state);
+    updateTitles(state);
+    updateChart("atm", state);
+    updateChart("minus100", state);
+    updateChart("plus100", state);
+    updateChart("cio", state);
+    updateSessionInfo(state);
+}
+
+async function loadLive(){
+    try{
+        const res = await fetch("/api/state", {cache:"no-store"});
+        if(!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const state = await res.json();
+        currentState = state;
+
+        const status = document.getElementById("connectionStatus");
+        status.textContent = state.message || (state.connected ? "LIVE — Zerodha connected" : "Disconnected");
+        status.style.color = state.connected ? "var(--green)" : "var(--yellow)";
+
+        document.getElementById("lastUpdate").textContent =
+            `Last update: ${formatTimeStamp(state.last_update)}`;
+
+        if(liveMode){
+            renderState(state);
+            syncDateSelectTo(state.date);
+        }
+
+    }catch(err){
+        document.getElementById("connectionStatus").textContent = "Unable to load live state";
+        document.getElementById("sessionMessage").textContent = err.message;
+    }
+}
+
+async function loadHistoryDates(){
+    try{
+        const res = await fetch("/api/history/dates", {cache:"no-store"});
+        if(!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const data = await res.json();
+        const dates = Array.isArray(data.dates) ? data.dates : [];
+        const select = document.getElementById("historyDate");
+
+        select.innerHTML = "";
+
+        if(currentState?.date && !dates.includes(currentState.date)){
+            dates.unshift(currentState.date);
+        }
+
+        const unique = [...new Set(dates)];
+
+        if(!unique.length){
+            const op = document.createElement("option");
+            op.value = currentState?.date || "";
+            op.textContent = currentState?.date || "No stored sessions";
+            select.appendChild(op);
+            return;
+        }
+
+        for(const d of unique){
+            const op = document.createElement("option");
+            op.value = d;
+            op.textContent = d + (d === currentState?.date ? " (Today)" : "");
+            select.appendChild(op);
+        }
+
+        syncDateSelectTo(currentState?.date || unique[0]);
+
+    }catch(err){
+        document.getElementById("sessionMessage").textContent =
+            `History dates unavailable: ${err.message}`;
+    }
+}
+
+function syncDateSelectTo(day){
+    if(!day) return;
+    const select = document.getElementById("historyDate");
+    const exists = [...select.options].some(o => o.value === day);
+
+    if(!exists){
+        const op = document.createElement("option");
+        op.value = day;
+        op.textContent = day;
+        select.prepend(op);
+    }
+
+    select.value = day;
+}
+
+async function onSessionChange(){
+    const day = document.getElementById("historyDate").value;
+    if(!day) return;
+
+    if(currentState && day === currentState.date){
+        liveMode = true;
+        document.getElementById("modeChip").textContent = "LIVE VIEW";
+        document.getElementById("sessionMessage").textContent = "";
+        renderState(currentState);
+        return;
+    }
+
+    liveMode = false;
+    document.getElementById("modeChip").textContent = "HISTORICAL VIEW";
+    document.getElementById("sessionMessage").textContent = `Loading ${day}...`;
+
+    try{
+        const res = await fetch(`/api/history/${encodeURIComponent(day)}`, {cache:"no-store"});
+        const data = await res.json();
+
+        if(!res.ok){
+            throw new Error(data.error || `HTTP ${res.status}`);
+        }
+
+        renderState(data);
+        document.getElementById("sessionMessage").textContent =
+            `Historical session loaded: ${day}`;
+
+    }catch(err){
+        document.getElementById("sessionMessage").textContent =
+            `Unable to load ${day}: ${err.message}`;
+    }
+}
+
+function showLiveToday(){
+    liveMode = true;
+    document.getElementById("modeChip").textContent = "LIVE VIEW";
+    document.getElementById("sessionMessage").textContent = "";
+
+    if(currentState){
+        renderState(currentState);
+        syncDateSelectTo(currentState.date);
+    }
+}
+
+function setIntervalView(key, minutes, btn){
+    selectedIntervals[key] = minutes;
+
+    document.querySelectorAll(`button[data-group="${key}"]`)
+        .forEach(b => b.classList.remove("active"));
+
+    btn.classList.add("active");
+
+    if(displayedState){
+        updateChart(key, displayedState);
+    }
+}
+
+function fullView(cardId){
+    const card = document.getElementById(cardId);
+    card.classList.toggle("full");
+
+    setTimeout(() => {
+        Object.values(charts).forEach(c => c.resize());
+    }, 50);
+}
+
+function downloadCIO(){
+    const select = document.getElementById("historyDate");
+
+    let day = null;
+
+    if(select && select.value){
+        day = select.value;
+    }else if(displayedState?.date){
+        day = displayedState.date;
+    }else if(currentState?.date){
+        day = currentState.date;
+    }
+
+    if(!day){
+        alert("No CIO date available for download.");
+        return;
+    }
+
+    // Uses the existing Flask route that already works when opened directly.
+    window.location.href =
+        "/api/download/cio/" + encodeURIComponent(day);
+}
+
+function toggleTheme(){
+    document.body.classList.toggle("light");
+    localStorage.setItem(
+        "pratik-theme",
+        document.body.classList.contains("light") ? "light" : "dark"
+    );
+
+    if(displayedState){
+        updateChart("atm", displayedState);
+        updateChart("minus100", displayedState);
+        updateChart("plus100", displayedState);
+        updateChart("cio", displayedState);
+    }
+}
+
+function restoreTheme(){
+    const saved = localStorage.getItem("pratik-theme");
+    if(saved === "light"){
+        document.body.classList.add("light");
+    }
+}
+
+async function boot(){
+    restoreTheme();
+    initCharts();
+
+    await loadLive();
+    await loadHistoryDates();
+
+    setInterval(loadLive, 5000);
+    setInterval(loadHistoryDates, 60000);
+}
+
+boot();
+</script>
+
+</body>
+</html>
