@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Pratik Analysis — Login</title>
+  <style>
+    :root{--bg:#061523;--panel:#081a2aee;--line:#0ea5e9;--text:#f4f7fb;--muted:#9bb0c7;--cyan:#20c4ff;--blue:#1478ff;--red:#ef4444;--green:#18d19b}
+    *{box-sizing:border-box} body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:var(--text);background:
+      radial-gradient(circle at 18% 40%,rgba(0,153,255,.15),transparent 32%),
+      radial-gradient(circle at 84% 45%,rgba(239,68,68,.13),transparent 30%),
+      linear-gradient(180deg,#061827 0%,#04111d 100%);overflow-x:hidden}
+    body:before,body:after{content:"";position:fixed;inset:0;pointer-events:none;opacity:.2}
+    body:before{background:repeating-linear-gradient(90deg,transparent 0 89px,rgba(90,145,190,.12) 90px),repeating-linear-gradient(0deg,transparent 0 59px,rgba(90,145,190,.10) 60px)}
+    .market-left,.market-right{position:fixed;top:16%;bottom:10%;width:28%;opacity:.33;filter:blur(.2px);pointer-events:none}
+    .market-left{left:0;background:linear-gradient(150deg,transparent 0 30%,rgba(0,224,255,.25) 31% 32%,transparent 33% 39%,rgba(0,224,255,.18) 40% 41%,transparent 42%)}
+    .market-right{right:0;background:linear-gradient(30deg,transparent 0 28%,rgba(255,50,80,.22) 29% 30%,transparent 31% 39%,rgba(30,220,180,.20) 40% 41%,transparent 42%)}
+    .topline{position:relative;z-index:2;display:flex;justify-content:space-between;padding:34px 5vw 0;color:#a9bfd7;letter-spacing:.38em;font-size:12px;text-transform:uppercase}.script{font-family:Georgia,serif;font-style:italic;letter-spacing:0;text-transform:none;font-size:26px;line-height:1.05;color:#b8d5ef;transform:rotate(-7deg)}
+    .wrap{position:relative;z-index:3;min-height:78vh;display:flex;align-items:center;justify-content:center;padding:30px 20px}.panel{width:min(680px,94vw);padding:32px 70px 28px;border:1px solid #0899ef;border-radius:16px;background:linear-gradient(180deg,rgba(5,23,39,.96),rgba(5,20,34,.94));box-shadow:0 26px 90px rgba(0,0,0,.4),0 0 40px rgba(0,144,255,.08)}
+    .logo{display:flex;justify-content:center;margin-bottom:8px}.mark{font-size:52px;line-height:1;color:#16a9ff;font-weight:900;transform:rotate(-7deg)}h1{text-align:center;margin:0;font-size:38px}.tag{text-align:center;color:#b4cae1;letter-spacing:.32em;font-size:13px;margin-top:6px}.divider{width:52px;height:1px;background:#b6c9db;margin:24px auto}.lead{text-align:center;color:#d3dfeb;font-size:17px;margin-bottom:22px}
+    .field{position:relative;margin:14px 0}.field input{width:100%;height:58px;border:1px solid #31526d;border-radius:11px;background:#0a2236;color:white;font-size:17px;padding:0 18px 0 54px;outline:none}.field input:focus{border-color:#19b6ff;box-shadow:0 0 0 3px rgba(25,182,255,.10)}.ico{position:absolute;left:18px;top:16px;font-size:22px;color:#9fc4e0}.row{display:flex;align-items:center;justify-content:space-between;color:#b9cadb;font-size:14px;margin:10px 2px 18px}.row label{display:flex;gap:8px;align-items:center}.row input{accent-color:#1478ff}.hint{color:#17c5ff}
+    .btn{width:100%;height:58px;border:0;border-radius:10px;background:linear-gradient(90deg,#1478ff,#0a96ff);color:white;font-size:20px;font-weight:700;cursor:pointer;box-shadow:0 10px 30px rgba(20,120,255,.25)}.btn:hover{filter:brightness(1.06)}.error{margin:0 0 14px;padding:11px 13px;border:1px solid #7f1d1d;background:#3a1117;color:#fecaca;border-radius:9px;font-size:14px}.warning{margin:18px 0 0;padding:13px;border:1px solid #26445d;background:#0a2236;border-radius:10px;text-align:center;color:#d3e1ef}.warning b{display:block}.warning span{font-size:13px;color:#98afc5}
+    .features{position:relative;z-index:3;display:grid;grid-template-columns:repeat(3,1fr);width:min(760px,92vw);margin:-10px auto 0;text-align:center}.feat{padding:12px 18px;border-right:1px solid #234056}.feat:last-child{border-right:0}.feat .fi{font-size:29px}.feat b{display:block;margin-top:7px}.feat small{color:#aebed0}.footer{position:relative;z-index:3;margin:24px 3vw 0;border-top:1px solid #17334a;padding:18px 0 24px;display:flex;justify-content:space-between;color:#9db0c4;font-size:12px;letter-spacing:.02em}.footer .mid{letter-spacing:.35em;text-transform:uppercase;font-size:10px}
+    @media(max-width:700px){.topline{display:none}.wrap{padding-top:20px}.panel{padding:28px 24px}.features{grid-template-columns:1fr}.feat{border-right:0;border-bottom:1px solid #1a3448}.footer{display:block;text-align:center;line-height:2}.footer .mid{margin:6px 0}.market-left,.market-right{display:none}}
+  </style>
+</head>
+<body>
+  <div class="market-left"></div><div class="market-right"></div>
+  <div class="topline"><div class="script">Discipline<br>Creates<br>Freedom</div><div>Analyse &nbsp;|&nbsp; Plan &nbsp;|&nbsp; Execute &nbsp;|&nbsp; Grow</div></div>
+  <main class="wrap">
+    <section class="panel">
+      <div class="logo"><div class="mark">↗</div></div>
+      <h1>Pratik Analysis</h1>
+      <div class="tag">DATA • DISCIPLINE • BETTER DECISIONS</div>
+      <div class="divider"></div>
+      <div class="lead">Sign in to access your trading dashboard</div>
+      {% if error %}<div class="error">{{ error }}</div>{% endif %}
+      {% if not configured %}<div class="error">Portal credentials are not configured on the server.</div>{% endif %}
+      <form method="post" autocomplete="on">
+        <div class="field"><span class="ico">♙</span><input name="username" type="text" placeholder="Username or Email" autocomplete="username" required></div>
+        <div class="field"><span class="ico">▣</span><input name="password" type="password" placeholder="Password" autocomplete="current-password" required></div>
+        <div class="row"><label><input type="checkbox" name="remember"> Remember me</label><span class="hint">Secure access</span></div>
+        <button class="btn" type="submit" {% if not configured %}disabled{% endif %}>Login &nbsp; →</button>
+      </form>
+      <div class="warning"><b>🛡 Authorized access only.</b><span>Dashboard and report data are protected behind this login.</span></div>
+    </section>
+  </main>
+  <section class="features">
+    <div class="feat"><div class="fi">▥</div><b>OIC + CIO</b><small>Options Open-Interest Analysis</small></div>
+    <div class="feat"><div class="fi">↗</div><b>NIFTY</b><small>Live Chart with Strategy Signals</small></div>
+    <div class="feat"><div class="fi">▤</div><b>REPORTS</b><small>Track Performance & Insights</small></div>
+  </section>
+  <footer class="footer"><span>© 2026 Pratik Analysis. All rights reserved.</span><span class="mid">Trade with data &nbsp;|&nbsp; Trade with discipline</span><span>🔒 Secure Access</span></footer>
+</body>
+</html>
