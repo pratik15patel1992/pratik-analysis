@@ -2,6 +2,7 @@ import os
 import json
 import time
 import threading
+import hmac
 from pathlib import Path
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -13,6 +14,8 @@ from flask import (
     request,
     jsonify,
     send_file,
+    session,
+    url_for,
 )
 
 from kiteconnect import KiteConnect, KiteTicker
@@ -34,9 +37,17 @@ KITE_API_KEY = os.environ.get("KITE_API_KEY", "")
 KITE_API_SECRET = os.environ.get("KITE_API_SECRET", "")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+PORTAL_USERNAME = os.environ.get("PORTAL_USERNAME", "")
+PORTAL_PASSWORD = os.environ.get("PORTAL_PASSWORD", "")
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=True,
+    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
+)
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
@@ -1480,6 +1491,75 @@ refresh_history_dates()
 # ============================================================
 # ROUTES
 # ============================================================
+
+# ============================================================
+# PORTAL AUTHENTICATION
+# ============================================================
+
+def portal_login_configured():
+    return bool(PORTAL_USERNAME and PORTAL_PASSWORD)
+
+
+def portal_authenticated():
+    return bool(session.get("portal_authenticated"))
+
+
+@app.before_request
+def require_portal_login():
+    # Login page, static assets and health check stay public.
+    if request.endpoint in {"portal_login", "static", "health"}:
+        return None
+
+    if not portal_authenticated():
+        next_url = request.full_path if request.query_string else request.path
+        return redirect(url_for("portal_login", next=next_url))
+
+    return None
+
+
+@app.route("/login", methods=["GET", "POST"])
+def portal_login():
+    if portal_authenticated():
+        return redirect(url_for("index"))
+
+    error = None
+    configured = portal_login_configured()
+
+    if request.method == "POST":
+        if not configured:
+            error = "Portal login is not configured on the server."
+        else:
+            username = request.form.get("username", "").strip()
+            password = request.form.get("password", "")
+
+            user_ok = hmac.compare_digest(username, PORTAL_USERNAME)
+            pass_ok = hmac.compare_digest(password, PORTAL_PASSWORD)
+
+            if user_ok and pass_ok:
+                session.clear()
+                session["portal_authenticated"] = True
+                session["portal_username"] = PORTAL_USERNAME
+                session.permanent = request.form.get("remember") == "on"
+
+                next_url = request.args.get("next", "")
+                if not next_url.startswith("/") or next_url.startswith("//"):
+                    next_url = url_for("index")
+                return redirect(next_url)
+
+            error = "Invalid username or password."
+
+    return render_template(
+        "login.html",
+        error=error,
+        configured=configured,
+    )
+
+
+@app.route("/logout")
+def portal_logout():
+    session.clear()
+    return redirect(url_for("portal_login"))
+
 
 @app.route("/")
 def index():
