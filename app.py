@@ -262,6 +262,16 @@ def init_db():
                     )
                     """
                 )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS pratik_kite_session (
+                        session_id SMALLINT PRIMARY KEY CHECK (session_id = 1),
+                        token_day DATE NOT NULL,
+                        access_token TEXT NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
             conn.commit()
 
         print(
@@ -466,31 +476,120 @@ def save_current_history():
 # ============================================================
 # ACCESS TOKEN
 # ============================================================
+# The daily Kite access token is persisted in Neon so a Render restart
+# does not depend on Render's temporary local filesystem.  We keep the
+# local JSON file only as a fallback when the database is unavailable.
 
 def save_access_token(token):
+    token_day = now_ist().date()
+    saved_to_db = False
+
+    if db_enabled():
+        try:
+            with db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO pratik_kite_session
+                            (session_id, token_day, access_token, updated_at)
+                        VALUES (1, %s, %s, NOW())
+                        ON CONFLICT (session_id)
+                        DO UPDATE SET
+                            token_day = EXCLUDED.token_day,
+                            access_token = EXCLUDED.access_token,
+                            updated_at = NOW()
+                        """,
+                        (token_day, token),
+                    )
+                conn.commit()
+            saved_to_db = True
+            print("[KITE] Today's access token saved to Neon.", flush=True)
+        except Exception as e:
+            print(f"[KITE] Neon token save failed: {e}", flush=True)
+
+    # Fallback copy. It is not relied on across Render restarts.
     safe_json_save(
         ACCESS_TOKEN_FILE,
         {
             "access_token": token,
+            "token_day": token_day.isoformat(),
             "saved_at": now_ist().isoformat(),
+            "database_saved": saved_to_db,
         },
     )
 
 
 def load_access_token():
-    data = safe_json_load(
-        ACCESS_TOKEN_FILE,
-        {},
-    )
+    today = now_ist().date()
 
-    return data.get("access_token")
+    if db_enabled():
+        try:
+            with db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT access_token
+                        FROM pratik_kite_session
+                        WHERE session_id = 1 AND token_day = %s
+                        """,
+                        (today,),
+                    )
+                    row = cur.fetchone()
+            if row and row[0]:
+                print("[KITE] Restored today's access token from Neon.", flush=True)
+                return row[0]
+        except Exception as e:
+            print(f"[KITE] Neon token load failed: {e}", flush=True)
+
+    # Local fallback is accepted only if it belongs to today.
+    data = safe_json_load(ACCESS_TOKEN_FILE, {})
+    token = data.get("access_token")
+    token_day = data.get("token_day")
+    if token and token_day == today.isoformat():
+        print("[KITE] Restored today's access token from local fallback.", flush=True)
+        return token
+
+    return None
 
 
 def clear_access_token():
+    if db_enabled():
+        try:
+            with db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM pratik_kite_session WHERE session_id = 1"
+                    )
+                conn.commit()
+        except Exception as e:
+            print(f"[KITE] Neon token clear failed: {e}", flush=True)
+
     try:
         ACCESS_TOKEN_FILE.unlink(missing_ok=True)
     except Exception:
         pass
+
+
+def restore_kite_session():
+    """Reconnect server-side after a Render restart, without a browser."""
+    if not (KITE_API_KEY and KITE_API_SECRET):
+        return False
+
+    token = load_access_token()
+    if not token:
+        return False
+
+    try:
+        start_live(token)
+        print("[KITE] Server-side session restored successfully.", flush=True)
+        return True
+    except Exception as e:
+        print(f"[KITE] Saved session restore failed: {e}", flush=True)
+        clear_access_token()
+        with lock:
+            state["connected"] = False
+            state["message"] = "Login required"
+        return False
 
 
 # ============================================================
@@ -1507,6 +1606,10 @@ def restore_today_history():
 init_db()
 restore_today_history()
 refresh_history_dates()
+# Important for free Render: when GitHub Actions wakes/restarts the service,
+# reconnect to Kite from today's Neon-persisted token without requiring the
+# dashboard to be opened in a browser.
+restore_kite_session()
 
 
 # ============================================================
