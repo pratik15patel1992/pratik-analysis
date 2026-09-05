@@ -1684,84 +1684,100 @@ def api_history_cio(day):
 def download_cio_excel(day):
 
     # ---------------------------------------------
-    # TODAY:
-    # Export from LIVE in-memory CIO series
+    # LOAD SELECTED SESSION
     # ---------------------------------------------
     if day == today_key():
 
         with lock:
             data = {
                 "date": day,
-                "expiry": state.get(
-                    "expiry"
-                ),
-                "opening_atm": state.get(
-                    "opening_atm"
-                ),
+                "expiry": state.get("expiry"),
+                "opening_atm": state.get("opening_atm"),
                 "series": {
+                    "minus100": list(
+                        state.get("series", {}).get("minus100", [])
+                    ),
+                    "atm": list(
+                        state.get("series", {}).get("atm", [])
+                    ),
+                    "plus100": list(
+                        state.get("series", {}).get("plus100", [])
+                    ),
                     "cio": list(
-                        state.get(
-                            "series",
-                            {},
-                        ).get(
-                            "cio",
-                            [],
-                        )
-                    )
+                        state.get("series", {}).get("cio", [])
+                    ),
                 },
             }
 
-    # ---------------------------------------------
-    # PREVIOUS DATE:
-    # Read from stored history
-    # ---------------------------------------------
     else:
 
         if not history_exists(day):
             return jsonify(
                 {
-                    "error": (
-                        "No stored CIO data for selected date."
-                    )
+                    "error": "No stored OIC/CIO data for selected date."
                 }
             ), 404
 
         data = load_day_history(day)
 
-    cio_data = data.get(
-        "series",
-        {},
-    ).get(
-        "cio",
-        [],
-    )
+    series = data.get("series", {})
 
-    if not cio_data:
+    minus100_data = series.get("minus100", [])
+    atm_data = series.get("atm", [])
+    plus100_data = series.get("plus100", [])
+    cio_data = series.get("cio", [])
+
+    if not (
+        minus100_data
+        or atm_data
+        or plus100_data
+        or cio_data
+    ):
         return jsonify(
             {
-                "error": (
-                    "No CIO data available for selected date."
-                )
+                "error": "No OIC/CIO data available for selected date."
             }
         ), 404
 
     # ---------------------------------------------
+    # BUILD MINUTE-WISE LOOKUPS
+    # ---------------------------------------------
+    def make_lookup(rows):
+        result = {}
+
+        for point in rows:
+            time_value = point.get("time")
+
+            if time_value:
+                result[time_value] = point
+
+        return result
+
+    minus100_lookup = make_lookup(minus100_data)
+    atm_lookup = make_lookup(atm_data)
+    plus100_lookup = make_lookup(plus100_data)
+    cio_lookup = make_lookup(cio_data)
+
+    all_times = sorted(
+        set(minus100_lookup.keys())
+        | set(atm_lookup.keys())
+        | set(plus100_lookup.keys())
+        | set(cio_lookup.keys())
+    )
+
+    # ---------------------------------------------
     # WORKBOOK
     # ---------------------------------------------
-
     wb = Workbook()
 
     ws = wb.active
-    ws.title = "CIO Data"
+    ws.title = "OIC + CIO Data"
 
     # ---------------------------------------------
     # TITLE
     # ---------------------------------------------
-
     ws["A1"] = "Pratik Analysis"
-    ws["A2"] = (
-        "CIO — Negative Change in Open Interest"
-    )
+    ws["A2"] = "OIC + CIO — Minute-wise Data"
 
     ws["A1"].font = Font(
         bold=True,
@@ -1776,28 +1792,28 @@ def download_cio_excel(day):
     # ---------------------------------------------
     # SESSION INFORMATION
     # ---------------------------------------------
-
     ws["A4"] = "Date"
     ws["B4"] = day
 
     ws["A5"] = "NIFTY Opening ATM"
-    ws["B5"] = data.get(
-        "opening_atm"
-    )
+    ws["B5"] = data.get("opening_atm")
 
     ws["A6"] = "Nearest Expiry"
-    ws["B6"] = data.get(
-        "expiry"
-    )
+    ws["B6"] = data.get("expiry")
 
     # ---------------------------------------------
     # HEADERS
     # ---------------------------------------------
-
     headers = [
         "Time",
-        "CE Negative Change in OI",
-        "PE Negative Change in OI",
+        "ATM -100 CE OI",
+        "ATM -100 PE OI",
+        "ATM CE OI",
+        "ATM PE OI",
+        "ATM +100 CE OI",
+        "ATM +100 PE OI",
+        "CIO CE Negative Change in OI",
+        "CIO PE Negative Change in OI",
     ]
 
     header_row = 8
@@ -1821,98 +1837,81 @@ def download_cio_excel(day):
         )
 
     # ---------------------------------------------
-    # CIO DATA
+    # DATA
     # ---------------------------------------------
-
-    for row_no, point in enumerate(
-        cio_data,
+    for row_no, time_value in enumerate(
+        all_times,
         start=header_row + 1,
     ):
-        ws.cell(
-            row=row_no,
-            column=1,
-            value=point.get("time"),
+
+        minus100 = minus100_lookup.get(
+            time_value,
+            {},
         )
 
-        ws.cell(
-            row=row_no,
-            column=2,
-            value=point.get("ce"),
+        atm = atm_lookup.get(
+            time_value,
+            {},
         )
 
-        ws.cell(
-            row=row_no,
-            column=3,
-            value=point.get("pe"),
+        plus100 = plus100_lookup.get(
+            time_value,
+            {},
         )
 
-    # ---------------------------------------------
-    # COLUMN WIDTH
-    # ---------------------------------------------
-
-    ws.column_dimensions["A"].width = 18
-    ws.column_dimensions["B"].width = 30
-    ws.column_dimensions["C"].width = 30
-
-    # ---------------------------------------------
-    # LINE CHART
-    # ---------------------------------------------
-
-    if len(cio_data) >= 2:
-
-        chart = LineChart()
-
-        chart.title = (
-            "CIO — Negative Change in Open Interest"
+        cio = cio_lookup.get(
+            time_value,
+            {},
         )
 
-        chart.y_axis.title = (
-            "Negative Change in OI"
-        )
+        values = [
+            time_value,
+            minus100.get("ce"),
+            minus100.get("pe"),
+            atm.get("ce"),
+            atm.get("pe"),
+            plus100.get("ce"),
+            plus100.get("pe"),
+            cio.get("ce"),
+            cio.get("pe"),
+        ]
 
-        chart.x_axis.title = "Time"
-
-        chart.height = 14
-        chart.width = 28
-
-        last_row = (
-            header_row
-            + len(cio_data)
-        )
-
-        values = Reference(
-            ws,
-            min_col=2,
-            max_col=3,
-            min_row=header_row,
-            max_row=last_row,
-        )
-
-        categories = Reference(
-            ws,
-            min_col=1,
-            min_row=header_row + 1,
-            max_row=last_row,
-        )
-
-        chart.add_data(
+        for col_no, value in enumerate(
             values,
-            titles_from_data=True,
-        )
-
-        chart.set_categories(
-            categories
-        )
-
-        ws.add_chart(
-            chart,
-            "E4",
-        )
+            1,
+        ):
+            ws.cell(
+                row=row_no,
+                column=col_no,
+                value=value,
+            )
 
     # ---------------------------------------------
-    # GENERATE FILE
+    # COLUMN WIDTHS
     # ---------------------------------------------
+    widths = {
+        "A": 14,
+        "B": 20,
+        "C": 20,
+        "D": 18,
+        "E": 18,
+        "F": 20,
+        "G": 20,
+        "H": 30,
+        "I": 30,
+    }
 
+    for column, width in widths.items():
+        ws.column_dimensions[column].width = width
+
+    # ---------------------------------------------
+    # FREEZE HEADER
+    # ---------------------------------------------
+    ws.freeze_panes = "A9"
+
+    # ---------------------------------------------
+    # SAVE
+    # ---------------------------------------------
     output = BytesIO()
 
     wb.save(output)
@@ -1920,7 +1919,7 @@ def download_cio_excel(day):
     output.seek(0)
 
     filename = (
-        f"Pratik_Analysis_CIO_{day}.xlsx"
+        f"Pratik_Analysis_OIC_CIO_{day}.xlsx"
     )
 
     return send_file(
@@ -1933,8 +1932,6 @@ def download_cio_excel(day):
             "spreadsheetml.sheet"
         ),
     )
-
-
 # ============================================================
 # HEALTH
 # ============================================================
