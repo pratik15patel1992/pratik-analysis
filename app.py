@@ -122,6 +122,14 @@ state = {
     },
 
     "history_dates": [],
+
+    # Strategy trade ledger. The live S1/S2/PNA engine will populate
+    # these lists once the exact signal rules are activated.
+    "strategies": {
+        "S1": {"trades": []},
+        "S2": {"trades": []},
+        "PNA": {"trades": []},
+    },
 }
 
 
@@ -399,6 +407,11 @@ def load_day_history(day):
                 "plus100": [],
                 "cio": [],
             },
+            "strategies": {
+                "S1": {"trades": []},
+                "S2": {"trades": []},
+                "PNA": {"trades": []},
+            },
         },
     )
 
@@ -431,6 +444,7 @@ def save_current_history():
             "zone": state.get("zone", {}),
             "oic": state.get("oic", {}),
             "series": state.get("series", {}),
+            "strategies": state.get("strategies", {}),
             "saved_at": now_ist().isoformat(),
         }
 
@@ -1482,6 +1496,13 @@ def restore_today_history():
                 "vix"
             ]
 
+        saved_strategies = saved.get("strategies") or {}
+        for strategy_name in ("S1", "S2", "PNA"):
+            strategy_data = saved_strategies.get(strategy_name) or {}
+            trades = strategy_data.get("trades") or []
+            if isinstance(trades, list):
+                state["strategies"][strategy_name]["trades"] = trades
+
 
 init_db()
 restore_today_history()
@@ -1877,6 +1898,277 @@ def download_cio_excel(day):
     filename = f"Pratik_Analysis_NIFTY_OIC_CIO_{day}.xlsx"
     return send_file(
         output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+# ============================================================
+# STRATEGY REPORTS + EXCEL EXPORT
+# ============================================================
+
+def _parse_report_day(value):
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _strategy_trades_from_day(day, data):
+    strategies = (data or {}).get("strategies") or {}
+    rows = []
+
+    for strategy_name in ("S1", "S2", "PNA"):
+        strategy_data = strategies.get(strategy_name) or {}
+        trades = strategy_data.get("trades") or []
+
+        if not isinstance(trades, list):
+            continue
+
+        for i, trade in enumerate(trades, start=1):
+            if not isinstance(trade, dict):
+                continue
+
+            row = dict(trade)
+            row.setdefault("date", day)
+            row.setdefault("strategy", strategy_name)
+            row.setdefault("trade_no", i)
+            rows.append(row)
+
+    return rows
+
+
+def _report_days(start_day, end_day):
+    refresh_history_dates()
+    with lock:
+        available = list(state.get("history_dates", []))
+        today_has_data = bool(state.get("date") == today_key())
+
+    if today_has_data and today_key() not in available:
+        available.append(today_key())
+
+    selected = []
+    for day in available:
+        d = _parse_report_day(day)
+        if d and start_day <= d <= end_day:
+            selected.append(day)
+
+    return sorted(set(selected))
+
+
+def _collect_report(start_text, end_text):
+    start_day = _parse_report_day(start_text)
+    end_day = _parse_report_day(end_text)
+
+    if not start_day or not end_day:
+        return None, "Please select a valid From and To date."
+
+    if start_day > end_day:
+        return None, "From date cannot be after To date."
+
+    days = _report_days(start_day, end_day)
+    all_trades = []
+
+    for day in days:
+        if day == today_key():
+            with lock:
+                data = {
+                    "date": day,
+                    "strategies": json.loads(json.dumps(state.get("strategies", {}))),
+                }
+        else:
+            data = load_day_history(day)
+
+        all_trades.extend(_strategy_trades_from_day(day, data))
+
+    def num(value):
+        try:
+            return float(value)
+        except Exception:
+            return 0.0
+
+    summary = {}
+    for name in ("S1", "S2", "PNA"):
+        trades = [t for t in all_trades if str(t.get("strategy", "")).upper() == name]
+        completed = [t for t in trades if t.get("exit_time") or t.get("exit_level") is not None]
+        points = [num(t.get("points")) for t in completed]
+        wins = sum(1 for p in points if p > 0)
+        losses = sum(1 for p in points if p < 0)
+        flat = sum(1 for p in points if p == 0)
+        sl_hits = sum(1 for t in completed if bool(t.get("sl_hit")))
+        maes = [num(t.get("mae")) for t in completed if t.get("mae") is not None]
+        mfes = [num(t.get("mfe")) for t in completed if t.get("mfe") is not None]
+
+        summary[name] = {
+            "trades": len(completed),
+            "wins": wins,
+            "losses": losses,
+            "flat": flat,
+            "win_rate": round((wins / len(completed) * 100), 2) if completed else 0.0,
+            "total_points": round(sum(points), 2),
+            "avg_points": round((sum(points) / len(completed)), 2) if completed else 0.0,
+            "sl_hits": sl_hits,
+            "avg_mae": round((sum(maes) / len(maes)), 2) if maes else 0.0,
+            "avg_mfe": round((sum(mfes) / len(mfes)), 2) if mfes else 0.0,
+            "best_trade": round(max(points), 2) if points else 0.0,
+            "worst_trade": round(min(points), 2) if points else 0.0,
+        }
+
+    daywise = []
+    for day in days:
+        item = {"date": day}
+        for name in ("S1", "S2", "PNA"):
+            day_trades = [
+                t for t in all_trades
+                if t.get("date") == day
+                and str(t.get("strategy", "")).upper() == name
+                and (t.get("exit_time") or t.get("exit_level") is not None)
+            ]
+            item[f"{name}_trades"] = len(day_trades)
+            item[f"{name}_points"] = round(sum(num(t.get("points")) for t in day_trades), 2)
+        daywise.append(item)
+
+    return {
+        "from": start_text,
+        "to": end_text,
+        "days": days,
+        "summary": summary,
+        "daywise": daywise,
+        "trades": all_trades,
+    }, None
+
+
+@app.route("/api/reports")
+def api_strategy_reports():
+    start_text = request.args.get("from", "")
+    end_text = request.args.get("to", "")
+    report, error = _collect_report(start_text, end_text)
+    if error:
+        return jsonify({"error": error}), 400
+    return jsonify(report)
+
+
+@app.route("/api/download/reports")
+def download_strategy_reports_excel():
+    start_text = request.args.get("from", "")
+    end_text = request.args.get("to", "")
+    report, error = _collect_report(start_text, end_text)
+    if error:
+        return jsonify({"error": error}), 400
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Overall Summary"
+
+    title_font = Font(bold=True, size=16)
+    header_font = Font(bold=True)
+
+    ws["A1"] = "Pratik Analysis"
+    ws["A2"] = "S1 / S2 / PNA Strategy Performance Report"
+    ws["A1"].font = title_font
+    ws["A2"].font = Font(bold=True, size=13)
+    ws["A4"] = "From"
+    ws["B4"] = start_text
+    ws["C4"] = "To"
+    ws["D4"] = end_text
+
+    summary_headers = [
+        "Strategy", "Trades", "Wins", "Losses", "Flat", "Win %",
+        "Total Points", "Avg Points/Trade", "30-Point SL Hits",
+        "Avg MAE", "Avg MFE", "Best Trade", "Worst Trade",
+    ]
+    for col, value in enumerate(summary_headers, 1):
+        cell = ws.cell(row=6, column=col, value=value)
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+
+    for row_no, name in enumerate(("S1", "S2", "PNA"), start=7):
+        m = report["summary"][name]
+        values = [
+            name, m["trades"], m["wins"], m["losses"], m["flat"], m["win_rate"],
+            m["total_points"], m["avg_points"], m["sl_hits"], m["avg_mae"],
+            m["avg_mfe"], m["best_trade"], m["worst_trade"],
+        ]
+        for col, value in enumerate(values, 1):
+            ws.cell(row=row_no, column=col, value=value)
+
+    ws_day = wb.create_sheet("Day-wise Summary")
+    day_headers = ["Date", "S1 Trades", "S1 Points", "S2 Trades", "S2 Points", "PNA Trades", "PNA Points"]
+    for col, value in enumerate(day_headers, 1):
+        c = ws_day.cell(row=1, column=col, value=value)
+        c.font = header_font
+    for row_no, d in enumerate(report["daywise"], start=2):
+        vals = [
+            d["date"], d["S1_trades"], d["S1_points"], d["S2_trades"],
+            d["S2_points"], d["PNA_trades"], d["PNA_points"],
+        ]
+        for col, value in enumerate(vals, 1):
+            ws_day.cell(row=row_no, column=col, value=value)
+
+    trade_headers = [
+        "Date", "Trade #", "Type", "Entry Time", "Entry Level", "30-Point SL",
+        "Exit Time", "Exit Level", "Points", "MAE", "MFE", "SL Hit?",
+        "Result", "Exit Reason", "Comments",
+    ]
+
+    for strategy_name in ("S1", "S2", "PNA"):
+        sheet = wb.create_sheet(f"{strategy_name} Trades")
+        for col, value in enumerate(trade_headers, 1):
+            c = sheet.cell(row=1, column=col, value=value)
+            c.font = header_font
+
+        rows = [t for t in report["trades"] if str(t.get("strategy", "")).upper() == strategy_name]
+        for row_no, t in enumerate(rows, start=2):
+            points = t.get("points")
+            result = t.get("result")
+            if not result and points is not None:
+                try:
+                    p = float(points)
+                    result = "WIN" if p > 0 else "LOSS" if p < 0 else "FLAT"
+                except Exception:
+                    result = ""
+
+            vals = [
+                t.get("date"), t.get("trade_no"), t.get("type") or t.get("side"),
+                t.get("entry_time"), t.get("entry_level"), t.get("sl_level"),
+                t.get("exit_time"), t.get("exit_level"), points, t.get("mae"),
+                t.get("mfe"), "YES" if t.get("sl_hit") else "NO", result,
+                t.get("exit_reason"), t.get("comments"),
+            ]
+            for col, value in enumerate(vals, 1):
+                sheet.cell(row=row_no, column=col, value=value)
+
+    risk = wb.create_sheet("Risk & SL")
+    risk_headers = ["Strategy", "Trades", "30-Point SL Hits", "Avg MAE", "Avg MFE", "Best Trade", "Worst Trade"]
+    for col, value in enumerate(risk_headers, 1):
+        c = risk.cell(row=1, column=col, value=value)
+        c.font = header_font
+    for row_no, name in enumerate(("S1", "S2", "PNA"), start=2):
+        m = report["summary"][name]
+        vals = [name, m["trades"], m["sl_hits"], m["avg_mae"], m["avg_mfe"], m["best_trade"], m["worst_trade"]]
+        for col, value in enumerate(vals, 1):
+            risk.cell(row=row_no, column=col, value=value)
+
+    for sheet in wb.worksheets:
+        sheet.freeze_panes = "A2" if sheet.title != "Overall Summary" else "A6"
+        for column_cells in sheet.columns:
+            max_len = 0
+            letter = column_cells[0].column_letter
+            for cell in column_cells:
+                try:
+                    max_len = max(max_len, len(str(cell.value or "")))
+                except Exception:
+                    pass
+            sheet.column_dimensions[letter].width = min(max(max_len + 2, 11), 30)
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    filename = f"Pratik_Analysis_Strategy_Report_{start_text}_to_{end_text}.xlsx"
+    return send_file(
+        buffer,
         as_attachment=True,
         download_name=filename,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
