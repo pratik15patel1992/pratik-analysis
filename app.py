@@ -103,6 +103,7 @@ state = {
     },
 
     "series": {
+        "nifty": [],
         "atm": [],
         "minus100": [],
         "plus100": [],
@@ -381,6 +382,7 @@ def load_day_history(day):
             "zone": {},
             "oic": {},
             "series": {
+                "nifty": [],
                 "atm": [],
                 "minus100": [],
                 "plus100": [],
@@ -1010,6 +1012,18 @@ def make_snapshot():
         return
 
     with lock:
+        nifty_price = state.get("nifty", {}).get("price")
+        if nifty_price is not None:
+            nifty_point = {
+                "time": minute_label(),
+                "timestamp": now_ist().isoformat(),
+                "price": float(nifty_price),
+            }
+            append_or_replace_minute(
+                state["series"]["nifty"],
+                nifty_point,
+            )
+
         for key in (
             "atm",
             "minus100",
@@ -1414,6 +1428,7 @@ def restore_today_history():
         state["date"] = day
 
         for key in (
+            "nifty",
             "atm",
             "minus100",
             "plus100",
@@ -1677,135 +1692,69 @@ def api_history_cio(day):
 
 
 # ============================================================
-# CIO EXCEL DOWNLOAD
+# OIC + CIO + NIFTY EXCEL DOWNLOAD
+# Existing route is preserved for frontend compatibility.
 # ============================================================
 
 @app.route("/api/download/cio/<day>")
 def download_cio_excel(day):
-
-    # ---------------------------------------------
-    # LOAD SELECTED SESSION
-    # ---------------------------------------------
     if day == today_key():
-
         with lock:
             data = {
                 "date": day,
                 "expiry": state.get("expiry"),
                 "opening_atm": state.get("opening_atm"),
                 "series": {
-                    "minus100": list(
-                        state.get("series", {}).get("minus100", [])
-                    ),
-                    "atm": list(
-                        state.get("series", {}).get("atm", [])
-                    ),
-                    "plus100": list(
-                        state.get("series", {}).get("plus100", [])
-                    ),
-                    "cio": list(
-                        state.get("series", {}).get("cio", [])
-                    ),
+                    key: list(state.get("series", {}).get(key, []))
+                    for key in ("nifty", "minus100", "atm", "plus100", "cio")
                 },
             }
-
     else:
-
         if not history_exists(day):
-            return jsonify(
-                {
-                    "error": "No stored OIC/CIO data for selected date."
-                }
-            ), 404
-
+            return jsonify({"error": "No stored data for selected date."}), 404
         data = load_day_history(day)
 
-    series = data.get("series", {})
+    series = data.get("series", {}) or {}
+    nifty_data = series.get("nifty", []) or []
+    minus100 = series.get("minus100", []) or []
+    atm = series.get("atm", []) or []
+    plus100 = series.get("plus100", []) or []
+    cio = series.get("cio", []) or []
 
-    minus100_data = series.get("minus100", [])
-    atm_data = series.get("atm", [])
-    plus100_data = series.get("plus100", [])
-    cio_data = series.get("cio", [])
+    if not any((nifty_data, minus100, atm, plus100, cio)):
+        return jsonify({"error": "No OIC/CIO/NIFTY data available for selected date."}), 404
 
-    if not (
-        minus100_data
-        or atm_data
-        or plus100_data
-        or cio_data
-    ):
-        return jsonify(
-            {
-                "error": "No OIC/CIO data available for selected date."
-            }
-        ), 404
+    def by_time(rows):
+        return {str(p.get("time")): p for p in rows if p.get("time")}
 
-    # ---------------------------------------------
-    # BUILD MINUTE-WISE LOOKUPS
-    # ---------------------------------------------
-    def make_lookup(rows):
-        result = {}
+    maps = {
+        "nifty": by_time(nifty_data),
+        "minus100": by_time(minus100),
+        "atm": by_time(atm),
+        "plus100": by_time(plus100),
+        "cio": by_time(cio),
+    }
+    all_times = sorted(set().union(*(m.keys() for m in maps.values())))
 
-        for point in rows:
-            time_value = point.get("time")
-
-            if time_value:
-                result[time_value] = point
-
-        return result
-
-    minus100_lookup = make_lookup(minus100_data)
-    atm_lookup = make_lookup(atm_data)
-    plus100_lookup = make_lookup(plus100_data)
-    cio_lookup = make_lookup(cio_data)
-
-    all_times = sorted(
-        set(minus100_lookup.keys())
-        | set(atm_lookup.keys())
-        | set(plus100_lookup.keys())
-        | set(cio_lookup.keys())
-    )
-
-    # ---------------------------------------------
-    # WORKBOOK
-    # ---------------------------------------------
     wb = Workbook()
-
     ws = wb.active
-    ws.title = "OIC + CIO Data"
+    ws.title = "OIC + CIO + NIFTY"
 
-    # ---------------------------------------------
-    # TITLE
-    # ---------------------------------------------
     ws["A1"] = "Pratik Analysis"
-    ws["A2"] = "OIC + CIO — Minute-wise Data"
+    ws["A2"] = "NIFTY + OIC + CIO — Minute-wise Data"
+    ws["A1"].font = Font(bold=True, size=16)
+    ws["A2"].font = Font(bold=True, size=13)
 
-    ws["A1"].font = Font(
-        bold=True,
-        size=16,
-    )
-
-    ws["A2"].font = Font(
-        bold=True,
-        size=13,
-    )
-
-    # ---------------------------------------------
-    # SESSION INFORMATION
-    # ---------------------------------------------
     ws["A4"] = "Date"
     ws["B4"] = day
-
     ws["A5"] = "NIFTY Opening ATM"
     ws["B5"] = data.get("opening_atm")
-
     ws["A6"] = "Nearest Expiry"
     ws["B6"] = data.get("expiry")
 
-    # ---------------------------------------------
-    # HEADERS
-    # ---------------------------------------------
     headers = [
         "Time",
+        "NIFTY Spot",
         "ATM -100 CE OI",
         "ATM -100 PE OI",
         "ATM CE OI",
@@ -1815,123 +1764,45 @@ def download_cio_excel(day):
         "CIO CE Negative Change in OI",
         "CIO PE Negative Change in OI",
     ]
-
     header_row = 8
+    for col, value in enumerate(headers, 1):
+        cell = ws.cell(row=header_row, column=col, value=value)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center")
 
-    for col, value in enumerate(
-        headers,
-        1,
-    ):
-        cell = ws.cell(
-            row=header_row,
-            column=col,
-            value=value,
-        )
-
-        cell.font = Font(
-            bold=True
-        )
-
-        cell.alignment = Alignment(
-            horizontal="center"
-        )
-
-    # ---------------------------------------------
-    # DATA
-    # ---------------------------------------------
-    for row_no, time_value in enumerate(
-        all_times,
-        start=header_row + 1,
-    ):
-
-        minus100 = minus100_lookup.get(
-            time_value,
-            {},
-        )
-
-        atm = atm_lookup.get(
-            time_value,
-            {},
-        )
-
-        plus100 = plus100_lookup.get(
-            time_value,
-            {},
-        )
-
-        cio = cio_lookup.get(
-            time_value,
-            {},
-        )
-
+    for row_no, t in enumerate(all_times, start=header_row + 1):
+        n = maps["nifty"].get(t, {})
+        m = maps["minus100"].get(t, {})
+        a = maps["atm"].get(t, {})
+        p = maps["plus100"].get(t, {})
+        c = maps["cio"].get(t, {})
         values = [
-            time_value,
-            minus100.get("ce"),
-            minus100.get("pe"),
-            atm.get("ce"),
-            atm.get("pe"),
-            plus100.get("ce"),
-            plus100.get("pe"),
-            cio.get("ce"),
-            cio.get("pe"),
+            t, n.get("price"),
+            m.get("ce"), m.get("pe"),
+            a.get("ce"), a.get("pe"),
+            p.get("ce"), p.get("pe"),
+            c.get("ce"), c.get("pe"),
         ]
+        for col, value in enumerate(values, 1):
+            ws.cell(row=row_no, column=col, value=value)
 
-        for col_no, value in enumerate(
-            values,
-            1,
-        ):
-            ws.cell(
-                row=row_no,
-                column=col_no,
-                value=value,
-            )
-
-    # ---------------------------------------------
-    # COLUMN WIDTHS
-    # ---------------------------------------------
-    widths = {
-        "A": 14,
-        "B": 20,
-        "C": 20,
-        "D": 18,
-        "E": 18,
-        "F": 20,
-        "G": 20,
-        "H": 30,
-        "I": 30,
-    }
-
-    for column, width in widths.items():
-        ws.column_dimensions[column].width = width
-
-    # ---------------------------------------------
-    # FREEZE HEADER
-    # ---------------------------------------------
     ws.freeze_panes = "A9"
+    widths = [14, 16, 20, 20, 20, 20, 20, 20, 32, 32]
+    for i, width in enumerate(widths, 1):
+        ws.column_dimensions[chr(64+i)].width = width
 
-    # ---------------------------------------------
-    # SAVE
-    # ---------------------------------------------
     output = BytesIO()
-
     wb.save(output)
-
     output.seek(0)
-
-    filename = (
-        f"Pratik_Analysis_OIC_CIO_{day}.xlsx"
-    )
-
+    filename = f"Pratik_Analysis_NIFTY_OIC_CIO_{day}.xlsx"
     return send_file(
         output,
         as_attachment=True,
         download_name=filename,
-        mimetype=(
-            "application/"
-            "vnd.openxmlformats-officedocument."
-            "spreadsheetml.sheet"
-        ),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
 # ============================================================
 # HEALTH
 # ============================================================
