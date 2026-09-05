@@ -690,13 +690,15 @@
                 <button type="button" onclick="setReportRange(10)">Last 10 Days</button>
                 <button type="button" onclick="setReportRange(15)">Last 15 Days</button>
                 <button type="button" onclick="setReportRange(30)">Last 30 Days</button>
+                <button type="button" onclick="loadStrategyReport()">Refresh Report</button>
+                <button class="downloadBtn" type="button" onclick="downloadStrategyReport()">⬇ Download Excel</button>
             </div>
             <section class="reportSummary">
-                <div class="strategyCard"><h3>S1</h3><div class="big">0</div><div class="mini">Trades recorded</div></div>
-                <div class="strategyCard"><h3>S2</h3><div class="big">0</div><div class="mini">Trades recorded</div></div>
-                <div class="strategyCard"><h3>PNA</h3><div class="big">0</div><div class="mini">Trades recorded</div></div>
+                <div class="strategyCard"><h3>S1</h3><div class="big" id="reportS1Trades">0</div><div class="mini" id="reportS1Meta">Trades recorded • 0.00 pts</div></div>
+                <div class="strategyCard"><h3>S2</h3><div class="big" id="reportS2Trades">0</div><div class="mini" id="reportS2Meta">Trades recorded • 0.00 pts</div></div>
+                <div class="strategyCard"><h3>PNA</h3><div class="big" id="reportPNATrades">0</div><div class="mini" id="reportPNAMeta">Trades recorded • 0.00 pts</div></div>
             </section>
-            <div class="notice">Reports will populate automatically once live strategy signals and exits are being stored.</div>
+            <div class="notice" id="reportNotice">Select a date range, then Refresh Report or Download Excel. Strategy values will populate once live S1/S2/PNA trades are stored.</div>
         </div>
     </div>
 
@@ -1277,6 +1279,46 @@ function setReportRange(days){
     const chosen=dates.slice(-days);
     document.getElementById("reportFrom").value=chosen[0];
     document.getElementById("reportTo").value=chosen[chosen.length-1];
+    loadStrategyReport();
+}
+
+function reportDates(){
+    return {
+        from: document.getElementById("reportFrom").value,
+        to: document.getElementById("reportTo").value
+    };
+}
+
+async function loadStrategyReport(){
+    const {from,to}=reportDates();
+    const notice=document.getElementById("reportNotice");
+    if(!from || !to){
+        notice.textContent="Please select both From and To dates.";
+        return;
+    }
+    try{
+        const res=await fetch(`/api/reports?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+        const data=await res.json();
+        if(!res.ok) throw new Error(data.error || "Unable to load report");
+        for(const name of ["S1","S2","PNA"]){
+            const m=data.summary?.[name] || {};
+            document.getElementById(`report${name}Trades`).textContent=m.trades ?? 0;
+            document.getElementById(`report${name}Meta`).textContent=`Wins ${m.wins ?? 0} • Losses ${m.losses ?? 0} • Win ${Number(m.win_rate || 0).toFixed(1)}% • ${Number(m.total_points || 0).toFixed(2)} pts`;
+        }
+        notice.textContent=`Report loaded for ${from} to ${to}. ${data.days?.length || 0} stored session(s) included.`;
+    }catch(err){
+        notice.textContent=err.message;
+    }
+}
+
+function downloadStrategyReport(){
+    const {from,to}=reportDates();
+    const notice=document.getElementById("reportNotice");
+    if(!from || !to){
+        notice.textContent="Please select both From and To dates before downloading.";
+        return;
+    }
+    window.location.href=`/api/download/reports?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
 }
 
 function toggleTheme(){
