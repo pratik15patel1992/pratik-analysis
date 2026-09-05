@@ -428,6 +428,25 @@
             .downloadBtn{width:100%}
             .sessionInfo{grid-template-columns:1fr 1fr}
         }
+
+        .pageTabs{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 12px 0;padding:10px;background:var(--panel);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow)}
+        .pageTab.active{border-color:var(--cyan);color:var(--cyan);font-weight:800}
+        .pageView{display:none}
+        .pageView.active{display:block}
+        .niftyHeader{display:grid;grid-template-columns:1.2fr repeat(4,.7fr);gap:10px;margin-bottom:10px}
+        .niftyChartCard{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:13px;box-shadow:var(--shadow);min-height:520px}
+        .niftyChartBox{height:420px;position:relative}
+        .strategyGrid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px}
+        .strategyCard{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:13px;box-shadow:var(--shadow)}
+        .strategyCard h3{margin:0 0 10px 0}
+        .strategyTable{width:100%;border-collapse:collapse;font-size:12px}
+        .strategyTable th,.strategyTable td{border-bottom:1px solid var(--border);padding:7px 6px;text-align:left}
+        .strategyTable th{color:var(--muted);font-size:11px;text-transform:uppercase}
+        .reportsControls{display:flex;gap:8px;flex-wrap:wrap;align-items:end;margin-bottom:10px}
+        .reportsControls label{font-size:12px;color:var(--muted)}
+        .reportsControls input{display:block;margin-top:4px;background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:9px;padding:8px}
+        .reportSummary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+        @media(max-width:900px){.niftyHeader,.strategyGrid,.reportSummary{grid-template-columns:1fr}.niftyChartBox{height:340px}}
     </style>
 </head>
 
@@ -457,6 +476,13 @@
         </div>
     </header>
 
+    <nav class="pageTabs">
+        <button id="tabOic" class="pageTab active" type="button" onclick="showPage('oic')">OIC + CIO</button>
+        <button id="tabNifty" class="pageTab" type="button" onclick="showPage('nifty')">NIFTY</button>
+        <button id="tabReports" class="pageTab" type="button" onclick="showPage('reports')">REPORTS</button>
+    </nav>
+
+    <div id="pageOic" class="pageView active">
     <section class="topGrid">
         <div class="card">
             <div class="cardTitle">NIFTY 50 (Spot)</div>
@@ -589,12 +615,11 @@
     <section class="footerGrid">
         <div class="card downloadBox">
             <div class="downloadText">
-                <h3>Download CIO Data (Excel)</h3>
-                <p>Selected session • minute-wise CE/PE negative Change in OI • Excel chart included</p>
+                <h3>Download NIFTY + OIC + CIO Data (Excel)</h3>
+                <p>Selected session • minute-wise NIFTY Spot + OIC + CIO data</p>
             </div>
             <button class="downloadBtn" type="button" onclick="downloadCIO()">
-                Download CIO Excel<br>
-                <small>(Includes Chart)</small>
+                Download NIFTY + OIC + CIO Excel
             </button>
         </div>
 
@@ -613,6 +638,67 @@
         CIO chart correction: <b>Time is on the X-axis</b> and <b>Negative Change in OI is on the Y-axis</b>.
         Historical sessions are loaded from permanent Neon storage when available.
     </div>
+    </div>
+
+    <div id="pageNifty" class="pageView">
+        <section class="niftyHeader">
+            <div class="card"><div class="cardTitle">NIFTY 50</div><div class="big" id="niftyPagePrice">—</div><div class="mini" id="niftyPageChange">Change: —</div></div>
+            <div class="card"><div class="cardTitle">Open</div><div class="big" id="niftyOpen">—</div></div>
+            <div class="card"><div class="cardTitle">High</div><div class="big positive" id="niftyHigh">—</div></div>
+            <div class="card"><div class="cardTitle">Low</div><div class="big negative" id="niftyLow">—</div></div>
+            <div class="card"><div class="cardTitle">Prev Close</div><div class="big" id="niftyPrev">—</div></div>
+        </section>
+
+        <div class="toolbar">
+            <label for="niftyHistoryDate">Session:</label>
+            <select id="niftyHistoryDate" onchange="onNiftySessionChange()"><option value="">Loading dates...</option></select>
+            <button type="button" onclick="showLiveTodayFromNifty()">Live Today</button>
+            <span id="niftyModeChip" class="liveChip">LIVE VIEW</span>
+            <span id="niftySessionMessage" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+
+        <article class="niftyChartCard" id="card-nifty">
+            <div class="chartHeader">
+                <div><h3>NIFTY 50 — Strategy Signals</h3><p>Yellow = WATCH • Green = PE SELL • Red = CE SELL • White = EXIT</p></div>
+                <div class="chartControls">
+                    <button onclick="fullView('card-nifty')">Full View</button>
+                    <button class="active" data-group="nifty" data-min="1" onclick="setNiftyInterval(1,this)">1m</button>
+                    <button data-group="nifty" data-min="3" onclick="setNiftyInterval(3,this)">3m</button>
+                    <button data-group="nifty" data-min="5" onclick="setNiftyInterval(5,this)">5m</button>
+                    <button data-group="nifty" data-min="15" onclick="setNiftyInterval(15,this)">15m</button>
+                </div>
+            </div>
+            <div class="niftyChartBox"><canvas id="chart-nifty"></canvas></div>
+            <div class="empty" id="empty-nifty">NIFTY minute data will start recording after this deployment.</div>
+        </article>
+
+        <section class="strategyGrid">
+            <div class="strategyCard"><h3>S1 Strategy</h3><div class="mini">Daily reset • 30-point hard SL</div><table class="strategyTable"><thead><tr><th>Entry</th><th>Level</th><th>Exit</th><th>Points</th></tr></thead><tbody id="s1Rows"><tr><td colspan="4">No completed trade yet</td></tr></tbody></table></div>
+            <div class="strategyCard"><h3>S2 Strategy</h3><div class="mini">Daily reset • 30-point hard SL</div><table class="strategyTable"><thead><tr><th>Entry</th><th>Level</th><th>Exit</th><th>Points</th></tr></thead><tbody id="s2Rows"><tr><td colspan="4">No completed trade yet</td></tr></tbody></table></div>
+            <div class="strategyCard"><h3>PNA Strategy</h3><div class="mini">Daily reset • 30-point hard SL</div><table class="strategyTable"><thead><tr><th>Entry</th><th>Level</th><th>Exit</th><th>Points</th></tr></thead><tbody id="pnaRows"><tr><td colspan="4">No completed trade yet</td></tr></tbody></table></div>
+        </section>
+        <div class="notice">Signal arrows and trade rows will be enabled after the exact numerical S1/S2/PNA rules are frozen. NIFTY minute data is recorded from this deployment onward.</div>
+    </div>
+
+    <div id="pageReports" class="pageView">
+        <div class="card">
+            <div class="chartHeader"><div><h3>Strategy Reports</h3><p>Multi-day S1 vs S2 vs PNA performance summary</p></div></div>
+            <div class="reportsControls">
+                <label>From<input id="reportFrom" type="date"></label>
+                <label>To<input id="reportTo" type="date"></label>
+                <button type="button" onclick="setReportRange(5)">Last 5 Days</button>
+                <button type="button" onclick="setReportRange(10)">Last 10 Days</button>
+                <button type="button" onclick="setReportRange(15)">Last 15 Days</button>
+                <button type="button" onclick="setReportRange(30)">Last 30 Days</button>
+            </div>
+            <section class="reportSummary">
+                <div class="strategyCard"><h3>S1</h3><div class="big">0</div><div class="mini">Trades recorded</div></div>
+                <div class="strategyCard"><h3>S2</h3><div class="big">0</div><div class="mini">Trades recorded</div></div>
+                <div class="strategyCard"><h3>PNA</h3><div class="big">0</div><div class="mini">Trades recorded</div></div>
+            </section>
+            <div class="notice">Reports will populate automatically once live strategy signals and exits are being stored.</div>
+        </div>
+    </div>
 
 </div>
 
@@ -622,6 +708,7 @@ let displayedState = null;
 let liveMode = true;
 
 const selectedIntervals = {
+    nifty: 1,
     atm: 1,
     minus100: 1,
     plus100: 1,
@@ -795,7 +882,19 @@ function makeChart(canvasId, isCio=false){
     });
 }
 
+function makeNiftyChart(){
+    const bodyIsLight = document.body.classList.contains("light");
+    const textColor = bodyIsLight ? "#617384" : "#8fa9bb";
+    const gridColor = bodyIsLight ? "rgba(80,110,130,.12)" : "rgba(130,160,180,.18)";
+    return new Chart(document.getElementById("chart-nifty"), {
+        type:"line",
+        data:{labels:[],datasets:[{label:"NIFTY Spot",data:[],borderColor:chartColors.ce,backgroundColor:chartColors.ce,borderWidth:2,pointRadius:0,pointHoverRadius:4,tension:.12}]},
+        options:{responsive:true,maintainAspectRatio:false,animation:false,interaction:{mode:"index",intersect:false},plugins:{legend:{labels:{color:textColor}}},scales:{x:{ticks:{color:textColor,maxTicksLimit:12},grid:{color:gridColor},title:{display:true,text:"Time",color:textColor}},y:{ticks:{color:textColor,callback:(v)=>indianNumber(v)},grid:{color:gridColor},title:{display:true,text:"NIFTY Spot",color:textColor}}}}
+    });
+}
+
 function initCharts(){
+    charts.nifty = makeNiftyChart();
     charts.atm = makeChart("chart-atm");
     charts.minus100 = makeChart("chart-minus100");
     charts.plus100 = makeChart("chart-plus100");
@@ -862,6 +961,29 @@ function updateStats(key, raw){
             <span class="pink">PE high: ${indianNumber(pe?.max?.value)} • low: ${indianNumber(pe?.min?.value)}</span>
         `;
     }
+}
+
+function updateNiftyPage(state){
+    const n = state?.nifty || {};
+    document.getElementById("niftyPagePrice").textContent = indianNumber(n.price);
+    document.getElementById("niftyOpen").textContent = indianNumber(n.open);
+    document.getElementById("niftyHigh").textContent = indianNumber(n.high);
+    document.getElementById("niftyLow").textContent = indianNumber(n.low);
+    document.getElementById("niftyPrev").textContent = indianNumber(n.previous_close);
+    const ch = Number(n.change), cp = Number(n.change_pct);
+    const el = document.getElementById("niftyPageChange");
+    if(Number.isFinite(ch) && Number.isFinite(cp)){
+        el.textContent = `Change: ${signed(ch,2)} (${signed(cp,3)}%)`;
+        el.className = "mini " + (ch >= 0 ? "positive" : "negative");
+    }else{ el.textContent = "Change: —"; el.className = "mini"; }
+
+    const raw = safeSeries(state,"nifty");
+    const series = aggregateSeries(raw, selectedIntervals.nifty);
+    const chart = charts.nifty;
+    chart.data.labels = series.map(p=>p.time || "");
+    chart.data.datasets[0].data = series.map(p=>Number(p.price));
+    chart.update("none");
+    document.getElementById("empty-nifty").style.display = raw.length ? "none" : "flex";
 }
 
 function updateTop(state){
@@ -938,6 +1060,8 @@ function renderState(state){
     updateChart("plus100", state);
     updateChart("cio", state);
     updateSessionInfo(state);
+    updateNiftyPage(state);
+    syncNiftyDateSelectTo(state?.date);
 }
 
 async function loadLive(){
@@ -999,6 +1123,9 @@ async function loadHistoryDates(){
         }
 
         syncDateSelectTo(currentState?.date || unique[0]);
+        const nselect = document.getElementById("niftyHistoryDate");
+        nselect.innerHTML = select.innerHTML;
+        syncNiftyDateSelectTo(currentState?.date || unique[0]);
 
     }catch(err){
         document.getElementById("sessionMessage").textContent =
@@ -1102,13 +1229,54 @@ function downloadCIO(){
     }
 
     if(!day){
-        alert("No CIO date available for download.");
+        alert("No session date available for download.");
         return;
     }
 
     // Uses the existing Flask route that already works when opened directly.
     window.location.href =
         "/api/download/cio/" + encodeURIComponent(day);
+}
+
+function showPage(name){
+    for(const id of ["oic","nifty","reports"]){
+        document.getElementById(`page${id.charAt(0).toUpperCase()+id.slice(1)}`).classList.toggle("active", id===name);
+        document.getElementById(`tab${id.charAt(0).toUpperCase()+id.slice(1)}`).classList.toggle("active", id===name);
+    }
+    setTimeout(()=>Object.values(charts).forEach(c=>c.resize()),50);
+}
+
+function syncNiftyDateSelectTo(day){
+    if(!day) return;
+    const select=document.getElementById("niftyHistoryDate");
+    if(!select) return;
+    if(![...select.options].some(o=>o.value===day)){const op=document.createElement("option");op.value=day;op.textContent=day;select.prepend(op);}
+    select.value=day;
+}
+
+async function onNiftySessionChange(){
+    const day=document.getElementById("niftyHistoryDate").value;
+    const main=document.getElementById("historyDate");
+    if(main){main.value=day; await onSessionChange();}
+    document.getElementById("niftyModeChip").textContent=liveMode?"LIVE VIEW":"HISTORICAL VIEW";
+    document.getElementById("niftySessionMessage").textContent=liveMode?"":`Historical session loaded: ${day}`;
+}
+
+function showLiveTodayFromNifty(){showLiveToday();syncNiftyDateSelectTo(currentState?.date);document.getElementById("niftyModeChip").textContent="LIVE VIEW";document.getElementById("niftySessionMessage").textContent="";}
+
+function setNiftyInterval(minutes,btn){
+    selectedIntervals.nifty=minutes;
+    document.querySelectorAll('button[data-group="nifty"]').forEach(b=>b.classList.remove("active"));
+    btn.classList.add("active");
+    if(displayedState) updateNiftyPage(displayedState);
+}
+
+function setReportRange(days){
+    const dates=[...document.getElementById("historyDate").options].map(o=>o.value).filter(Boolean).sort();
+    if(!dates.length) return;
+    const chosen=dates.slice(-days);
+    document.getElementById("reportFrom").value=chosen[0];
+    document.getElementById("reportTo").value=chosen[chosen.length-1];
 }
 
 function toggleTheme(){
@@ -1123,6 +1291,7 @@ function toggleTheme(){
         updateChart("minus100", displayedState);
         updateChart("plus100", displayedState);
         updateChart("cio", displayedState);
+        updateNiftyPage(displayedState);
     }
 }
 
