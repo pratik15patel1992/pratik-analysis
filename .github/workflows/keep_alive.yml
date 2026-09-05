@@ -1,0 +1,40 @@
+name: Pratik Analysis Market Keep Alive
+
+on:
+  schedule:
+    # Runs every 10 minutes, Monday-Friday.
+    # GitHub cron uses UTC.
+    - cron: '7,17,27,37,47,57 3-10 * * 1-5'
+
+  # Allows us to test it manually from GitHub.
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Keep Pratik Analysis awake during market hours
+        shell: bash
+        run: |
+          NOW=$(TZ=Asia/Kolkata date +%H%M)
+          DAY=$(TZ=Asia/Kolkata date +%u)
+
+          echo "India time: $(TZ=Asia/Kolkata date)"
+
+          if [ "$DAY" -le 5 ] && [ "$NOW" -ge 0905 ] && [ "$NOW" -le 1540 ]; then
+            echo "Market-hours window active - pinging Pratik Analysis"
+
+            curl \
+              --fail \
+              --silent \
+              --show-error \
+              --max-time 120 \
+              --retry 2 \
+              https://pratik-analysis.onrender.com/health
+
+            echo
+            echo "Keep-alive successful"
+          else
+            echo "Outside market-hours window - no ping required"
+          fi
