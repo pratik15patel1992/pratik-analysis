@@ -1072,6 +1072,55 @@ function aggregateNiftySeries(series,minutes){
     return result;
 }
 
+
+const strategySignalPlugin={
+    id:"strategySignalPlugin",
+    afterDatasetsDraw(chart){
+        const signals=chart.$strategySignals||[];
+        if(!signals.length) return;
+        const {ctx,scales:{x,y}}=chart;
+        ctx.save(); ctx.font="bold 10px sans-serif"; ctx.textAlign="center"; ctx.textBaseline="middle";
+        for(const s of signals){
+            const px=x.getPixelForValue(Number(s.x)), py=y.getPixelForValue(Number(s.y));
+            if(!Number.isFinite(px)||!Number.isFinite(py)) continue;
+            const isExit=s.action==="EXIT";
+            const color=isExit?"#ffffff":(s.type==="PE"?"#44df8d":"#ff6b6b");
+            ctx.fillStyle=color; ctx.strokeStyle="#08131b"; ctx.lineWidth=2;
+            ctx.beginPath();
+            if(isExit){ctx.arc(px,py,6,0,Math.PI*2);} else if(s.type==="PE"){ctx.moveTo(px,py-9);ctx.lineTo(px-7,py+5);ctx.lineTo(px+7,py+5);ctx.closePath();} else {ctx.moveTo(px,py+9);ctx.lineTo(px-7,py-5);ctx.lineTo(px+7,py-5);ctx.closePath();}
+            ctx.fill();ctx.stroke();
+            const label=`${s.strategy} ${isExit?"EXIT":("SELL "+s.type)}`;
+            const ty=isExit?py-16:(s.type==="PE"?py+17:py-17);
+            const w=ctx.measureText(label).width+8; ctx.fillStyle="rgba(4,13,20,.86)";ctx.fillRect(px-w/2,ty-7,w,14);ctx.fillStyle=color;ctx.fillText(label,px,ty);
+        }
+        ctx.restore();
+    }
+};
+Chart.register(strategySignalPlugin);
+
+function allStrategySignals(state){
+    const out=[];
+    for(const name of ["S1","S2","PNA"]){
+        const s=state?.strategies?.[name]||{};
+        for(const sig of (Array.isArray(s.signals)?s.signals:[])) out.push({...sig,strategy:name});
+        if(s.active && !out.some(x=>x.strategy===name && x.action==="ENTRY" && x.time===s.active.entry_time)){
+            out.push({strategy:name,action:"ENTRY",type:s.active.type,time:s.active.entry_time,timestamp:s.active.entry_timestamp,nifty_level:s.active.entry_level});
+        }
+    }
+    return out;
+}
+
+function signalTimeValue(sig,state){
+    if(sig.timestamp){const t=new Date(sig.timestamp).getTime();if(Number.isFinite(t))return t;}
+    const day=state?.date||new Date().toISOString().slice(0,10);
+    return new Date(`${day}T${sig.time||"09:15"}:00+05:30`).getTime();
+}
+
+function priceAtMinute(rows,time){
+    const row=(rows||[]).find(r=>r.time===time);
+    return row?Number(row.close??row.price):null;
+}
+
 function makeNiftyChart(){
     const bodyIsLight = document.body.classList.contains("light");
     const textColor = bodyIsLight ? "#617384" : "#8fa9bb";
@@ -1173,6 +1222,9 @@ function updatePremiumChart(def,state){
     const series=aggregatePremiumSeries(raw,mins);
     const chart=charts[`premium-${def.id}`]; if(!chart) return;
     chart.data.datasets[0].data=series.map(p=>({x:premiumTimeValue(p,state),o:Number(p.open),h:Number(p.high),l:Number(p.low),c:Number(p.close ?? p.price)}));
+    chart.$strategySignals=allStrategySignals(state).filter(sig=>sig.type===def.type).map(sig=>({
+        ...sig,x:signalTimeValue(sig,state),y:priceAtMinute(raw,sig.time)
+    })).filter(s=>Number.isFinite(s.y));
     chart.update("none");
     const empty=document.getElementById(`empty-premium-${def.id}`); if(empty) empty.style.display=raw.length?"none":"flex";
     const last=raw[raw.length-1]||{};
@@ -1358,8 +1410,31 @@ function updateNiftyPage(state){
         l:Number(p.low ?? p.price),
         c:Number(p.close ?? p.price)
     }));
+    chart.$strategySignals=allStrategySignals(state).map(sig=>({
+        ...sig,x:signalTimeValue(sig,state),y:Number(sig.nifty_level)
+    })).filter(s=>Number.isFinite(s.y));
     chart.update("none");
+    updateStrategyTables(state);
     document.getElementById("empty-nifty").style.display = raw.length ? "none" : "flex";
+}
+
+
+function strategyPoints(t){
+    const p=Number(t?.points); if(Number.isFinite(p)) return p;
+    const e=Number(t?.entry_level),x=Number(t?.exit_level); if(!Number.isFinite(e)||!Number.isFinite(x)) return null;
+    return t?.type==="CE"?e-x:x-e;
+}
+function updateStrategyTables(state){
+    const defs=[['S1','s1Rows'],['S2','s2Rows'],['PNA','pnaRows']];
+    for(const [name,id] of defs){
+        const s=state?.strategies?.[name]||{}; const rows=[];
+        for(const t of (Array.isArray(s.trades)?s.trades:[])){
+            const pts=strategyPoints(t);
+            rows.push(`<tr><td>${t.entry_time||'—'} ${t.type?('SELL '+t.type):''}</td><td>${indianNumber(t.entry_level)}</td><td>${t.exit_time||'—'}</td><td class="${Number(pts)>=0?'positive':'negative'}">${Number.isFinite(pts)?signed(pts,2):'—'}</td></tr>`);
+        }
+        if(s.active) rows.push(`<tr><td>${s.active.entry_time||'—'} SELL ${s.active.type||''}</td><td>${indianNumber(s.active.entry_level)}</td><td><b>OPEN</b></td><td>SL ${indianNumber(s.active.sl_level)}</td></tr>`);
+        document.getElementById(id).innerHTML=rows.length?rows.join(''):`<tr><td colspan="4">No trade yet</td></tr>`;
+    }
 }
 
 function updateTop(state){
