@@ -157,6 +157,11 @@ snapshot_thread_started = False
 latest_nifty = {}
 latest_vix = {}
 
+# Live 1-minute NIFTY OHLC aggregator. Kite's tick ``ohlc`` field is
+# session/day OHLC, not a 1-minute candle, so we build true minute candles
+# ourselves from the live NIFTY last_price ticks.
+nifty_minute_bucket = None
+
 tick_counter = 0
 oi_tick_counter = 0
 
@@ -1131,22 +1136,80 @@ def oic_point(key):
     }
 
 
+def update_nifty_minute_ohlc(price):
+    """Aggregate live NIFTY ticks into a true 1-minute OHLC candle."""
+    global nifty_minute_bucket
+
+    if price is None:
+        return
+
+    p = float(price)
+    n = now_ist()
+    minute = n.strftime("%H:%M")
+    timestamp = n.isoformat()
+
+    with lock:
+        # Minute rollover: finalise the previous candle in memory first.
+        if (
+            nifty_minute_bucket
+            and nifty_minute_bucket.get("time") != minute
+        ):
+            finalised = dict(nifty_minute_bucket)
+            finalised["price"] = finalised.get("close")
+            append_or_replace_minute(
+                state["series"]["nifty"],
+                finalised,
+            )
+            nifty_minute_bucket = None
+
+        if nifty_minute_bucket is None:
+            nifty_minute_bucket = {
+                "time": minute,
+                "timestamp": timestamp,
+                "open": p,
+                "high": p,
+                "low": p,
+                "close": p,
+                # Backward-compatible alias used by the existing chart/API.
+                "price": p,
+            }
+        else:
+            nifty_minute_bucket["high"] = max(
+                float(nifty_minute_bucket.get("high", p)),
+                p,
+            )
+            nifty_minute_bucket["low"] = min(
+                float(nifty_minute_bucket.get("low", p)),
+                p,
+            )
+            nifty_minute_bucket["close"] = p
+            nifty_minute_bucket["price"] = p
+            nifty_minute_bucket["timestamp"] = timestamp
+
+
+def snapshot_current_nifty_candle():
+    """Copy the current in-progress minute candle into state history."""
+    with lock:
+        if not nifty_minute_bucket:
+            return
+
+        point = dict(nifty_minute_bucket)
+        point["price"] = point.get("close")
+        append_or_replace_minute(
+            state["series"]["nifty"],
+            point,
+        )
+
+
 def make_snapshot():
     if not state.get("connected"):
         return
 
     with lock:
-        nifty_price = state.get("nifty", {}).get("price")
-        if nifty_price is not None:
-            nifty_point = {
-                "time": minute_label(),
-                "timestamp": now_ist().isoformat(),
-                "price": float(nifty_price),
-            }
-            append_or_replace_minute(
-                state["series"]["nifty"],
-                nifty_point,
-            )
+        # Persist the true 1-minute NIFTY OHLC candle assembled from ticks.
+        # ``price`` remains an alias of ``close`` so the current frontend
+        # continues to work without any HTML/JavaScript change.
+        snapshot_current_nifty_candle()
 
         for key in (
             "atm",
@@ -1235,6 +1298,7 @@ def ensure_snapshot_worker():
 
 def on_ticks(ws, ticks):
     global latest_nifty
+    global nifty_minute_bucket
     global latest_vix
     global tick_counter
     global oi_tick_counter
@@ -1281,6 +1345,9 @@ def on_ticks(ws, ticks):
                 latest_nifty[
                     "price"
                 ] = float(price)
+
+                # Build true minute OHLC from each live NIFTY tick.
+                update_nifty_minute_ohlc(price)
 
             if open_price is not None:
                 latest_nifty[
@@ -1945,7 +2012,7 @@ def download_cio_excel(day):
     ws.title = "OIC + CIO + NIFTY"
 
     ws["A1"] = "Pratik Analysis"
-    ws["A2"] = "NIFTY + OIC + CIO — Minute-wise Data"
+    ws["A2"] = "NIFTY 1-Min OHLC + OIC + CIO — Minute-wise Data"
     ws["A1"].font = Font(bold=True, size=16)
     ws["A2"].font = Font(bold=True, size=13)
 
@@ -1958,7 +2025,10 @@ def download_cio_excel(day):
 
     headers = [
         "Time",
-        "NIFTY Spot",
+        "NIFTY Open",
+        "NIFTY High",
+        "NIFTY Low",
+        "NIFTY Close",
         "ATM -100 CE OI",
         "ATM -100 PE OI",
         "ATM CE OI",
@@ -1980,8 +2050,15 @@ def download_cio_excel(day):
         a = maps["atm"].get(t, {})
         p = maps["plus100"].get(t, {})
         c = maps["cio"].get(t, {})
+        # Older stored days may contain only ``price``.  For those rows,
+        # fall back to that value so historical downloads remain readable.
+        fallback_price = n.get("price")
         values = [
-            t, n.get("price"),
+            t,
+            n.get("open", fallback_price),
+            n.get("high", fallback_price),
+            n.get("low", fallback_price),
+            n.get("close", fallback_price),
             m.get("ce"), m.get("pe"),
             a.get("ce"), a.get("pe"),
             p.get("ce"), p.get("pe"),
@@ -1991,7 +2068,7 @@ def download_cio_excel(day):
             ws.cell(row=row_no, column=col, value=value)
 
     ws.freeze_panes = "A9"
-    widths = [14, 16, 20, 20, 20, 20, 20, 20, 32, 32]
+    widths = [14, 16, 16, 16, 16, 20, 20, 20, 20, 20, 20, 32, 32]
     for i, width in enumerate(widths, 1):
         ws.column_dimensions[chr(64+i)].width = width
 
