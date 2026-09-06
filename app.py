@@ -113,12 +113,27 @@ state = {
         "plus100": None,
     },
 
+    # Locked six option contracts used for premium analytics.
+    # Populated once opening ATM is known.
+    "premium": {
+        "atm": None,
+        "minus100": None,
+        "plus100": None,
+    },
+
     "series": {
         "nifty": [],
         "atm": [],
         "minus100": [],
         "plus100": [],
         "cio": [],
+        # True 1-minute option premium OHLC, built from live ticks.
+        # Each strike bucket contains CE and PE candles.
+        "premium": {
+            "minus100": {"CE": [], "PE": []},
+            "atm": {"CE": [], "PE": []},
+            "plus100": {"CE": [], "PE": []},
+        },
     },
 
     "history_dates": [],
@@ -146,6 +161,7 @@ vix_token = None
 option_instruments = []
 token_meta = {}
 oic_tokens = {}
+premium_token_map = {}
 
 latest_oi = {}
 prev_oi = {}
@@ -161,6 +177,10 @@ latest_vix = {}
 # session/day OHLC, not a 1-minute candle, so we build true minute candles
 # ourselves from the live NIFTY last_price ticks.
 nifty_minute_bucket = None
+
+# Live minute buckets for the six locked option contracts.
+# Keyed by instrument token so CE/PE candles are independently aggregated.
+premium_minute_buckets = {}
 
 tick_counter = 0
 oi_tick_counter = 0
@@ -421,6 +441,16 @@ def load_day_history(day):
                 "minus100": [],
                 "plus100": [],
                 "cio": [],
+                "premium": {
+                    "minus100": {"CE": [], "PE": []},
+                    "atm": {"CE": [], "PE": []},
+                    "plus100": {"CE": [], "PE": []},
+                },
+            },
+            "premium": {
+                "atm": None,
+                "minus100": None,
+                "plus100": None,
             },
             "strategies": {
                 "S1": {"trades": []},
@@ -458,6 +488,7 @@ def save_current_history():
             "vix": state.get("vix", {}),
             "zone": state.get("zone", {}),
             "oic": state.get("oic", {}),
+            "premium": state.get("premium", {}),
             "series": state.get("series", {}),
             "strategies": state.get("strategies", {}),
             "saved_at": now_ist().isoformat(),
@@ -858,6 +889,7 @@ def discover_instruments(k):
 
 def lock_oic_strikes():
     global oic_tokens
+    global premium_token_map
 
     with lock:
         atm = state.get(
@@ -902,10 +934,25 @@ def lock_oic_strikes():
 
     oic_tokens = mapping
 
+    # Reverse token lookup used by the premium OHLC aggregator.
+    premium_token_map = {}
+    for key, legs in mapping.items():
+        for option_type in ("CE", "PE"):
+            token = legs.get(option_type)
+            if token:
+                premium_token_map[int(token)] = {
+                    "key": key,
+                    "type": option_type,
+                    "strike": int(legs["strike"]),
+                }
+
     with lock:
         state["oic"]["atm"] = atm
         state["oic"]["minus100"] = atm - 100
         state["oic"]["plus100"] = atm + 100
+        state["premium"]["atm"] = atm
+        state["premium"]["minus100"] = atm - 100
+        state["premium"]["plus100"] = atm + 100
 
     print(
         f"[DIAG] OIC strike mapping={mapping}",
@@ -1201,6 +1248,73 @@ def snapshot_current_nifty_candle():
         )
 
 
+def update_premium_minute_ohlc(token, price, oi=None):
+    """Aggregate one of the six locked option contracts into true 1-minute OHLC."""
+    global premium_minute_buckets
+
+    meta = premium_token_map.get(int(token))
+    if not meta or price is None:
+        return
+
+    p = float(price)
+    n = now_ist()
+    minute = n.strftime("%H:%M")
+    timestamp = n.isoformat()
+    token = int(token)
+
+    with lock:
+        bucket = premium_minute_buckets.get(token)
+
+        if bucket and bucket.get("time") != minute:
+            finalised = dict(bucket)
+            append_or_replace_minute(
+                state["series"]["premium"][meta["key"]][meta["type"]],
+                finalised,
+            )
+            bucket = None
+
+        if bucket is None:
+            bucket = {
+                "time": minute,
+                "timestamp": timestamp,
+                "strike": meta["strike"],
+                "type": meta["type"],
+                "open": p,
+                "high": p,
+                "low": p,
+                "close": p,
+                "ltp": p,
+                "oi": int(oi) if oi is not None else latest_oi.get(token),
+            }
+        else:
+            bucket["high"] = max(float(bucket.get("high", p)), p)
+            bucket["low"] = min(float(bucket.get("low", p)), p)
+            bucket["close"] = p
+            bucket["ltp"] = p
+            bucket["timestamp"] = timestamp
+            if oi is not None:
+                bucket["oi"] = int(oi)
+            elif latest_oi.get(token) is not None:
+                bucket["oi"] = int(latest_oi[token])
+
+        premium_minute_buckets[token] = bucket
+
+
+def snapshot_current_premium_candles():
+    """Copy all in-progress premium candles into state before persistence."""
+    with lock:
+        for token, bucket in list(premium_minute_buckets.items()):
+            if not bucket:
+                continue
+            meta = premium_token_map.get(int(token))
+            if not meta:
+                continue
+            append_or_replace_minute(
+                state["series"]["premium"][meta["key"]][meta["type"]],
+                dict(bucket),
+            )
+
+
 def make_snapshot():
     if not state.get("connected"):
         return
@@ -1210,6 +1324,7 @@ def make_snapshot():
         # ``price`` remains an alias of ``close`` so the current frontend
         # continues to work without any HTML/JavaScript change.
         snapshot_current_nifty_candle()
+        snapshot_current_premium_candles()
 
         for key in (
             "atm",
@@ -1299,6 +1414,7 @@ def ensure_snapshot_worker():
 def on_ticks(ws, ticks):
     global latest_nifty
     global nifty_minute_bucket
+    global premium_minute_buckets
     global latest_vix
     global tick_counter
     global oi_tick_counter
@@ -1454,6 +1570,13 @@ def on_ticks(ws, ticks):
                     state["vix"] = dict(
                         latest_vix
                     )
+
+        # OPTION PREMIUM (six locked strikes only)
+        if token in premium_token_map:
+            premium_price = q.get("last_price")
+            premium_oi = q.get("oi")
+            if premium_price is not None:
+                update_premium_minute_ohlc(token, premium_price, premium_oi)
 
         # OPTION OI
         if token in token_meta:
@@ -1632,6 +1755,19 @@ def restore_today_history():
                 state[
                     "series"
                 ][key] = series[key]
+
+        premium_series = series.get("premium") or {}
+        for premium_key in ("minus100", "atm", "plus100"):
+            legs = premium_series.get(premium_key) or {}
+            for option_type in ("CE", "PE"):
+                rows = legs.get(option_type) or []
+                if isinstance(rows, list):
+                    state["series"]["premium"][premium_key][option_type] = rows
+
+        saved_premium = saved.get("premium") or {}
+        for premium_key in ("minus100", "atm", "plus100"):
+            if saved_premium.get(premium_key) is not None:
+                state["premium"][premium_key] = saved_premium.get(premium_key)
 
         if saved.get(
             "opening_atm"
@@ -1960,6 +2096,33 @@ def api_history_cio(day):
             ),
         }
     )
+
+
+@app.route("/api/premium/<day>")
+def api_premium_day(day):
+    """Return the six recorded option-premium OHLC series for a session."""
+    if day == today_key():
+        with lock:
+            snapshot_current_premium_candles()
+            return jsonify({
+                "date": day,
+                "expiry": state.get("expiry"),
+                "opening_atm": state.get("opening_atm"),
+                "premium": state.get("premium", {}),
+                "series": state.get("series", {}).get("premium", {}),
+            })
+
+    if not history_exists(day):
+        return jsonify({"error": "No stored data for selected date."}), 404
+
+    data = load_day_history(day)
+    return jsonify({
+        "date": day,
+        "expiry": data.get("expiry"),
+        "opening_atm": data.get("opening_atm"),
+        "premium": data.get("premium", {}),
+        "series": (data.get("series", {}) or {}).get("premium", {}),
+    })
 
 
 # ============================================================
@@ -2380,6 +2543,16 @@ def health():
             ),
             "baseline_ready": baseline_ready,
             "oic_tokens": oic_tokens,
+            "premium_tokens": premium_token_map,
+            "premium_points": {
+                key: {
+                    option_type: len(
+                        state.get("series", {}).get("premium", {}).get(key, {}).get(option_type, [])
+                    )
+                    for option_type in ("CE", "PE")
+                }
+                for key in ("minus100", "atm", "plus100")
+            },
             "database_configured": db_enabled(),
             "database_history_days": len(db_history_dates()),
             "cio_points": len(
