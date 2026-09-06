@@ -568,6 +568,7 @@
                 </div>
                 <div class="chartControls">
                     <button onclick="fullView('card-atm')">Full View</button>
+                    <button onclick="resetChartZoom('atm')">Reset Zoom</button>
                     <button class="active" data-group="atm" data-min="1" onclick="setIntervalView('atm',1,this)">1m</button>
                     <button data-group="atm" data-min="3" onclick="setIntervalView('atm',3,this)">3m</button>
                     <button data-group="atm" data-min="5" onclick="setIntervalView('atm',5,this)">5m</button>
@@ -587,6 +588,7 @@
                 </div>
                 <div class="chartControls">
                     <button onclick="fullView('card-minus100')">Full View</button>
+                    <button onclick="resetChartZoom('minus100')">Reset Zoom</button>
                     <button class="active" data-group="minus100" data-min="1" onclick="setIntervalView('minus100',1,this)">1m</button>
                     <button data-group="minus100" data-min="3" onclick="setIntervalView('minus100',3,this)">3m</button>
                     <button data-group="minus100" data-min="5" onclick="setIntervalView('minus100',5,this)">5m</button>
@@ -606,6 +608,7 @@
                 </div>
                 <div class="chartControls">
                     <button onclick="fullView('card-plus100')">Full View</button>
+                    <button onclick="resetChartZoom('plus100')">Reset Zoom</button>
                     <button class="active" data-group="plus100" data-min="1" onclick="setIntervalView('plus100',1,this)">1m</button>
                     <button data-group="plus100" data-min="3" onclick="setIntervalView('plus100',3,this)">3m</button>
                     <button data-group="plus100" data-min="5" onclick="setIntervalView('plus100',5,this)">5m</button>
@@ -625,6 +628,7 @@
                 </div>
                 <div class="chartControls">
                     <button onclick="fullView('card-cio')">Full View</button>
+                    <button onclick="resetChartZoom('cio')">Reset Zoom</button>
                     <button class="active" data-group="cio" data-min="1" onclick="setIntervalView('cio',1,this)">1m</button>
                     <button data-group="cio" data-min="3" onclick="setIntervalView('cio',3,this)">3m</button>
                     <button data-group="cio" data-min="5" onclick="setIntervalView('cio',5,this)">5m</button>
@@ -688,6 +692,7 @@
                 <div><h3>NIFTY 50 — Strategy Signals</h3><p>Yellow = WATCH • Green = PE SELL • Red = CE SELL • White = EXIT</p></div>
                 <div class="chartControls">
                     <button onclick="fullView('card-nifty')">Full View</button>
+                    <button onclick="resetChartZoom('nifty')">Reset Zoom</button>
                     <button class="active" data-group="nifty" data-min="1" onclick="setNiftyInterval(1,this)">1m</button>
                     <button data-group="nifty" data-min="3" onclick="setNiftyInterval(3,this)">3m</button>
                     <button data-group="nifty" data-min="5" onclick="setNiftyInterval(5,this)">5m</button>
@@ -911,6 +916,16 @@ function chartOptions(isCio=false){
                         return `${ctx.dataset.label}: ${indianNumber(ctx.raw)}`;
                     }
                 }
+            },
+            zoom:{
+                limits:{x:{min:"original",max:"original"}},
+                pan:{enabled:true,mode:"x"},
+                zoom:{
+                    wheel:{enabled:true,speed:0.08},
+                    pinch:{enabled:true},
+                    drag:{enabled:false},
+                    mode:"x"
+                }
             }
         },
         scales:{
@@ -984,7 +999,29 @@ function makeNiftyChart(){
     return new Chart(document.getElementById("chart-nifty"), {
         type:"line",
         data:{labels:[],datasets:[{label:"NIFTY Spot",data:[],borderColor:chartColors.ce,backgroundColor:chartColors.ce,borderWidth:2,pointRadius:0,pointHoverRadius:4,tension:.12}]},
-        options:{responsive:true,maintainAspectRatio:false,animation:false,interaction:{mode:"index",intersect:false},plugins:{legend:{labels:{color:textColor}}},scales:{x:{ticks:{color:textColor,maxTicksLimit:12},grid:{color:gridColor},title:{display:true,text:"Time",color:textColor}},y:{ticks:{color:textColor,callback:(v)=>indianNumber(v)},grid:{color:gridColor},title:{display:true,text:"NIFTY Spot",color:textColor}}}}
+        options:{
+            responsive:true,
+            maintainAspectRatio:false,
+            animation:false,
+            interaction:{mode:"index",intersect:false},
+            plugins:{
+                legend:{labels:{color:textColor}},
+                zoom:{
+                    limits:{x:{min:"original",max:"original"}},
+                    pan:{enabled:true,mode:"x"},
+                    zoom:{
+                        wheel:{enabled:true,speed:0.08},
+                        pinch:{enabled:true},
+                        drag:{enabled:false},
+                        mode:"x"
+                    }
+                }
+            },
+            scales:{
+                x:{ticks:{color:textColor,maxTicksLimit:12},grid:{color:gridColor},title:{display:true,text:"Time",color:textColor}},
+                y:{ticks:{color:textColor,callback:(v)=>indianNumber(v)},grid:{color:gridColor},title:{display:true,text:"NIFTY Spot",color:textColor}}
+            }
+        }
     });
 }
 
@@ -1424,6 +1461,13 @@ function setIntervalView(key, minutes, btn){
 
     if(displayedState){
         updateChart(key, displayedState);
+    }
+}
+
+function resetChartZoom(key){
+    const chart = charts[key];
+    if(chart && typeof chart.resetZoom === "function"){
+        chart.resetZoom();
     }
 }
 
