@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import time
 import threading
 import hmac
@@ -2517,6 +2518,451 @@ def download_strategy_reports_excel():
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
+
+
+# ============================================================
+# OPTION PREMIUM PERFORMANCE + EXCEL EXPORT
+# ============================================================
+
+PREMIUM_KEYS = ("minus100", "atm", "plus100")
+PREMIUM_LABELS = {
+    "minus100": "ATM -100",
+    "atm": "ATM",
+    "plus100": "ATM +100",
+}
+
+
+def _normalise_hhmm(value):
+    """Return HH:MM from common stored time formats."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    # ISO datetime
+    if "T" in text:
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).strftime("%H:%M")
+        except Exception:
+            pass
+    # HH:MM[:SS] or labels containing a time
+    import re
+    m = re.search(r"(?:^|\s)(\d{1,2}):(\d{2})(?::\d{2})?", text)
+    if m:
+        try:
+            hh = int(m.group(1)); mm = int(m.group(2))
+            if 0 <= hh <= 23 and 0 <= mm <= 59:
+                return f"{hh:02d}:{mm:02d}"
+        except Exception:
+            pass
+    return None
+
+
+def _trade_option_type(trade):
+    """Map strategy trade direction to the sold option leg (CE or PE)."""
+    values = [
+        trade.get("type"), trade.get("side"), trade.get("signal"),
+        trade.get("option_type"), trade.get("direction"),
+    ]
+    text = " ".join(str(v or "") for v in values).upper()
+    if "PE" in text:
+        return "PE"
+    if "CE" in text:
+        return "CE"
+    return None
+
+
+def _series_for_premium(data, key, option_type):
+    return ((((data or {}).get("series") or {}).get("premium") or {}).get(key) or {}).get(option_type) or []
+
+
+def _candle_by_minute(series):
+    result = {}
+    for p in series or []:
+        if not isinstance(p, dict):
+            continue
+        hhmm = _normalise_hhmm(p.get("time") or p.get("timestamp"))
+        if hhmm:
+            result[hhmm] = p
+    return result
+
+
+def _premium_trade_metrics(trade, day_data, key, option_type):
+    """Calculate sold-option performance from stored 1-minute OHLC.
+
+    Entry/exit use the candle close at the strategy entry/exit minute. This is the
+    most precise reproducible value available from the stored 1-minute premium
+    history. MAE/MFE use minute highs/lows while the strategy trade is open.
+    """
+    series = _series_for_premium(day_data, key, option_type)
+    if not series:
+        return None
+
+    entry_time = _normalise_hhmm(trade.get("entry_time") or trade.get("entry_timestamp"))
+    exit_time = _normalise_hhmm(trade.get("exit_time") or trade.get("exit_timestamp"))
+    if not entry_time or not exit_time:
+        return None
+
+    by_minute = _candle_by_minute(series)
+    entry_candle = by_minute.get(entry_time)
+    exit_candle = by_minute.get(exit_time)
+    if not entry_candle or not exit_candle:
+        return None
+
+    def f(value):
+        try:
+            n = float(value)
+            return n if math.isfinite(n) else None
+        except Exception:
+            return None
+
+    entry = f(entry_candle.get("close", entry_candle.get("ltp")))
+    exit_ = f(exit_candle.get("close", exit_candle.get("ltp")))
+    if entry is None or exit_ is None:
+        return None
+
+    window = []
+    for p in series:
+        t = _normalise_hhmm(p.get("time") or p.get("timestamp"))
+        if t and entry_time <= t <= exit_time:
+            window.append(p)
+
+    highs = [f(p.get("high")) for p in window]
+    lows = [f(p.get("low")) for p in window]
+    highs = [v for v in highs if v is not None]
+    lows = [v for v in lows if v is not None]
+
+    highest = max(highs) if highs else max(entry, exit_)
+    lowest = min(lows) if lows else min(entry, exit_)
+
+    # All tracked strategy legs are option SELLs.
+    premium_points = entry - exit_
+    premium_pct = (premium_points / entry * 100.0) if entry else 0.0
+    mae = max(0.0, highest - entry)   # premium rise is adverse for a seller
+    mfe = max(0.0, entry - lowest)    # premium fall is favourable for a seller
+
+    strike = None
+    for c in (entry_candle, exit_candle):
+        try:
+            if c.get("strike") is not None:
+                strike = int(float(c.get("strike")))
+                break
+        except Exception:
+            pass
+    if strike is None:
+        premium_map = (day_data or {}).get("premium") or {}
+        try:
+            strike = int(float(premium_map.get(key)))
+        except Exception:
+            strike = None
+
+    entry_oi = entry_candle.get("oi")
+    exit_oi = exit_candle.get("oi")
+    try:
+        oi_change = int(exit_oi) - int(entry_oi) if entry_oi is not None and exit_oi is not None else None
+    except Exception:
+        oi_change = None
+
+    return {
+        "strike_key": key,
+        "strike_label": PREMIUM_LABELS[key],
+        "strike": strike,
+        "option_type": option_type,
+        "entry_time": entry_time,
+        "exit_time": exit_time,
+        "entry_premium": round(entry, 2),
+        "exit_premium": round(exit_, 2),
+        "premium_points": round(premium_points, 2),
+        "premium_pct": round(premium_pct, 2),
+        "highest_premium": round(highest, 2),
+        "lowest_premium": round(lowest, 2),
+        "premium_mae": round(mae, 2),
+        "premium_mfe": round(mfe, 2),
+        "entry_oi": entry_oi,
+        "exit_oi": exit_oi,
+        "oi_change": oi_change,
+        "result": "WIN" if premium_points > 0 else "LOSS" if premium_points < 0 else "FLAT",
+    }
+
+
+def _collect_premium_report(start_text, end_text):
+    start_day = _parse_report_day(start_text)
+    end_day = _parse_report_day(end_text)
+    if not start_day or not end_day:
+        return None, "Please select a valid From and To date."
+    if start_day > end_day:
+        return None, "From date cannot be after To date."
+
+    days = _report_days(start_day, end_day)
+    rows = []
+
+    for day in days:
+        if day == today_key():
+            with lock:
+                snapshot_current_premium_candles()
+                day_data = json.loads(json.dumps({
+                    "date": day,
+                    "opening_atm": state.get("opening_atm"),
+                    "premium": state.get("premium", {}),
+                    "series": state.get("series", {}),
+                    "strategies": state.get("strategies", {}),
+                }))
+        else:
+            day_data = load_day_history(day)
+
+        trades = _strategy_trades_from_day(day, day_data)
+        for trade in trades:
+            # Only completed strategy trades have a reproducible entry -> exit interval.
+            if not (trade.get("exit_time") or trade.get("exit_timestamp")):
+                continue
+            option_type = _trade_option_type(trade)
+            if option_type not in ("CE", "PE"):
+                continue
+
+            for key in PREMIUM_KEYS:
+                metrics = _premium_trade_metrics(trade, day_data, key, option_type)
+                if not metrics:
+                    continue
+                row = {
+                    "date": day,
+                    "strategy": str(trade.get("strategy") or "").upper(),
+                    "trade_no": trade.get("trade_no"),
+                    "signal": trade.get("type") or trade.get("side") or f"SELL {option_type}",
+                    "nifty_entry": trade.get("entry_level"),
+                    "nifty_exit": trade.get("exit_level"),
+                    "nifty_points": trade.get("points"),
+                    "exit_reason": trade.get("exit_reason"),
+                    "sl_hit": bool(trade.get("sl_hit")),
+                }
+                row.update(metrics)
+                rows.append(row)
+
+    def _summary(group_rows):
+        pts = [float(r["premium_points"]) for r in group_rows]
+        wins = sum(1 for p in pts if p > 0)
+        losses = sum(1 for p in pts if p < 0)
+        flat = sum(1 for p in pts if p == 0)
+        return {
+            "trades": len(group_rows),
+            "wins": wins,
+            "losses": losses,
+            "flat": flat,
+            "win_rate": round(wins / len(group_rows) * 100, 2) if group_rows else 0.0,
+            "total_premium_points": round(sum(pts), 2),
+            "avg_premium_points": round(sum(pts) / len(pts), 2) if pts else 0.0,
+            "avg_mae": round(sum(float(r["premium_mae"]) for r in group_rows) / len(group_rows), 2) if group_rows else 0.0,
+            "avg_mfe": round(sum(float(r["premium_mfe"]) for r in group_rows) / len(group_rows), 2) if group_rows else 0.0,
+            "best_trade": round(max(pts), 2) if pts else 0.0,
+            "worst_trade": round(min(pts), 2) if pts else 0.0,
+        }
+
+    strategy_summary = {}
+    for name in ("S1", "S2", "PNA"):
+        strategy_summary[name] = _summary([r for r in rows if r["strategy"] == name])
+
+    strike_summary = {}
+    for key in PREMIUM_KEYS:
+        strike_summary[key] = _summary([r for r in rows if r["strike_key"] == key])
+
+    strategy_strike_summary = []
+    for name in ("S1", "S2", "PNA"):
+        for key in PREMIUM_KEYS:
+            group = [r for r in rows if r["strategy"] == name and r["strike_key"] == key]
+            s = _summary(group)
+            strategy_strike_summary.append({"strategy": name, "strike_key": key, "strike_label": PREMIUM_LABELS[key], **s})
+
+    daily = []
+    for day in days:
+        item = {"date": day}
+        day_rows = [r for r in rows if r["date"] == day]
+        item.update(_summary(day_rows))
+        daily.append(item)
+
+    overall = _summary(rows)
+    return {
+        "from": start_text,
+        "to": end_text,
+        "days": days,
+        "overall": overall,
+        "strategy_summary": strategy_summary,
+        "strike_summary": strike_summary,
+        "strategy_strike_summary": strategy_strike_summary,
+        "daily": daily,
+        "trades": rows,
+        "note": "Premium entry/exit uses stored 1-minute option candle close at each strategy signal minute; MAE/MFE uses minute high/low while the trade is open.",
+    }, None
+
+
+@app.route("/api/premium/reports")
+def api_premium_reports():
+    report, error = _collect_premium_report(request.args.get("from", ""), request.args.get("to", ""))
+    if error:
+        return jsonify({"error": error}), 400
+    return jsonify(report)
+
+
+def _style_workbook(wb):
+    for sheet in wb.worksheets:
+        sheet.freeze_panes = "A2"
+        for row in sheet.iter_rows():
+            for cell in row:
+                if cell.row == 1:
+                    cell.font = Font(bold=True)
+                    cell.alignment = Alignment(horizontal="center")
+        for column_cells in sheet.columns:
+            letter = column_cells[0].column_letter
+            max_len = max((len(str(c.value or "")) for c in column_cells), default=8)
+            sheet.column_dimensions[letter].width = min(max(max_len + 2, 11), 34)
+
+
+@app.route("/api/download/premium/reports")
+def download_premium_reports_excel():
+    start_text = request.args.get("from", "")
+    end_text = request.args.get("to", "")
+    report, error = _collect_premium_report(start_text, end_text)
+    if error:
+        return jsonify({"error": error}), 400
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Premium Overall Summary"
+    ws.append(["PRATIK ANALYSIS — OPTION PREMIUM PERFORMANCE"])
+    ws.append(["From", start_text, "To", end_text])
+    ws.append(["Method", report["note"]])
+    ws.append([])
+    ws.append(["Metric", "Value"])
+    for key, label in [
+        ("trades", "Premium observations (3 strikes per completed trade)"),
+        ("wins", "Profitable premium observations"),
+        ("losses", "Losing premium observations"),
+        ("flat", "Flat premium observations"),
+        ("win_rate", "Win %"),
+        ("total_premium_points", "Total premium points"),
+        ("avg_premium_points", "Avg premium points / observation"),
+        ("avg_mae", "Avg premium MAE"),
+        ("avg_mfe", "Avg premium MFE"),
+        ("best_trade", "Best premium observation"),
+        ("worst_trade", "Worst premium observation"),
+    ]:
+        ws.append([label, report["overall"][key]])
+
+    ss = wb.create_sheet("Strategy-wise Summary")
+    headers = ["Strategy", "Observations", "Wins", "Losses", "Flat", "Win %", "Total Premium Pts", "Avg Premium Pts", "Avg MAE", "Avg MFE", "Best", "Worst"]
+    ss.append(headers)
+    for name in ("S1", "S2", "PNA"):
+        m = report["strategy_summary"][name]
+        ss.append([name, m["trades"], m["wins"], m["losses"], m["flat"], m["win_rate"], m["total_premium_points"], m["avg_premium_points"], m["avg_mae"], m["avg_mfe"], m["best_trade"], m["worst_trade"]])
+
+    st = wb.create_sheet("Strike-wise Summary")
+    st.append(["Strike Group", "Observations", "Wins", "Losses", "Flat", "Win %", "Total Premium Pts", "Avg Premium Pts", "Avg MAE", "Avg MFE", "Best", "Worst"])
+    for key in PREMIUM_KEYS:
+        m = report["strike_summary"][key]
+        st.append([PREMIUM_LABELS[key], m["trades"], m["wins"], m["losses"], m["flat"], m["win_rate"], m["total_premium_points"], m["avg_premium_points"], m["avg_mae"], m["avg_mfe"], m["best_trade"], m["worst_trade"]])
+
+    combo = wb.create_sheet("Strategy x Strike")
+    combo.append(["Strategy", "Strike Group", "Observations", "Wins", "Losses", "Flat", "Win %", "Total Premium Pts", "Avg Premium Pts", "Avg MAE", "Avg MFE", "Best", "Worst"])
+    for x in report["strategy_strike_summary"]:
+        combo.append([x["strategy"], x["strike_label"], x["trades"], x["wins"], x["losses"], x["flat"], x["win_rate"], x["total_premium_points"], x["avg_premium_points"], x["avg_mae"], x["avg_mfe"], x["best_trade"], x["worst_trade"]])
+
+    trades = wb.create_sheet("Premium Entry Exit")
+    trade_headers = [
+        "Date", "Strategy", "Trade #", "Signal", "Strike Group", "Strike", "Option",
+        "Entry Time", "Entry Premium", "Exit Time", "Exit Premium", "Premium Points", "Premium %",
+        "Highest Premium", "Lowest Premium", "Premium MAE", "Premium MFE", "Entry OI", "Exit OI", "OI Change",
+        "NIFTY Entry", "NIFTY Exit", "NIFTY Points", "SL Hit?", "Premium Result", "Exit Reason",
+    ]
+    trades.append(trade_headers)
+    for r in report["trades"]:
+        trades.append([
+            r["date"], r["strategy"], r["trade_no"], r["signal"], r["strike_label"], r["strike"], r["option_type"],
+            r["entry_time"], r["entry_premium"], r["exit_time"], r["exit_premium"], r["premium_points"], r["premium_pct"],
+            r["highest_premium"], r["lowest_premium"], r["premium_mae"], r["premium_mfe"], r["entry_oi"], r["exit_oi"], r["oi_change"],
+            r["nifty_entry"], r["nifty_exit"], r["nifty_points"], "YES" if r["sl_hit"] else "NO", r["result"], r["exit_reason"],
+        ])
+
+    mm = wb.create_sheet("Premium MAE MFE")
+    mm.append(["Date", "Strategy", "Trade #", "Strike Group", "Strike", "Option", "Entry Premium", "Highest", "Lowest", "MAE", "MFE", "Premium Points"])
+    for r in report["trades"]:
+        mm.append([r["date"], r["strategy"], r["trade_no"], r["strike_label"], r["strike"], r["option_type"], r["entry_premium"], r["highest_premium"], r["lowest_premium"], r["premium_mae"], r["premium_mfe"], r["premium_points"]])
+
+    daily = wb.create_sheet("Daily Premium Summary")
+    daily.append(["Date", "Observations", "Wins", "Losses", "Flat", "Win %", "Total Premium Pts", "Avg Premium Pts", "Avg MAE", "Avg MFE", "Best", "Worst"])
+    for d in report["daily"]:
+        daily.append([d["date"], d["trades"], d["wins"], d["losses"], d["flat"], d["win_rate"], d["total_premium_points"], d["avg_premium_points"], d["avg_mae"], d["avg_mfe"], d["best_trade"], d["worst_trade"]])
+
+    compare = wb.create_sheet("NIFTY vs Premium")
+    compare.append(["Date", "Strategy", "Trade #", "Signal", "Strike Group", "Strike", "Option", "NIFTY Points", "Premium Points", "Premium %", "Premium Result"])
+    for r in report["trades"]:
+        compare.append([r["date"], r["strategy"], r["trade_no"], r["signal"], r["strike_label"], r["strike"], r["option_type"], r["nifty_points"], r["premium_points"], r["premium_pct"], r["result"]])
+
+    _style_workbook(wb)
+    # Restore the intended premium-overall title presentation after generic styling.
+    ws["A1"].font = Font(bold=True, size=16)
+    ws["A5"].font = Font(bold=True)
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    filename = f"Pratik_Analysis_Premium_Report_{start_text}_to_{end_text}.xlsx"
+    return send_file(buffer, as_attachment=True, download_name=filename, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@app.route("/api/download/premium/raw/<day>")
+def download_raw_premium_excel(day):
+    if day == today_key():
+        with lock:
+            snapshot_current_premium_candles()
+            data = json.loads(json.dumps({
+                "date": day,
+                "expiry": state.get("expiry"),
+                "opening_atm": state.get("opening_atm"),
+                "premium": state.get("premium", {}),
+                "series": state.get("series", {}),
+            }))
+    else:
+        if not history_exists(day):
+            return jsonify({"error": "No stored data for selected date."}), 404
+        data = load_day_history(day)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Raw Premium 1-Min"
+    ws.append(["Pratik Analysis — 1-Min Option Premium OHLC + OI"])
+    ws.append(["Date", day, "Expiry", data.get("expiry"), "Opening ATM", data.get("opening_atm")])
+    ws.append([])
+    headers = [
+        "Time",
+        "ATM -100 CE O", "H", "L", "C", "OI",
+        "ATM -100 PE O", "H", "L", "C", "OI",
+        "ATM CE O", "H", "L", "C", "OI",
+        "ATM PE O", "H", "L", "C", "OI",
+        "ATM +100 CE O", "H", "L", "C", "OI",
+        "ATM +100 PE O", "H", "L", "C", "OI",
+    ]
+    ws.append(headers)
+
+    maps = {}
+    all_times = set()
+    for key in PREMIUM_KEYS:
+        for option_type in ("CE", "PE"):
+            m = _candle_by_minute(_series_for_premium(data, key, option_type))
+            maps[(key, option_type)] = m
+            all_times.update(m.keys())
+
+    for time_key in sorted(all_times):
+        row = [time_key]
+        for key in PREMIUM_KEYS:
+            for option_type in ("CE", "PE"):
+                p = maps[(key, option_type)].get(time_key) or {}
+                row.extend([p.get("open"), p.get("high"), p.get("low"), p.get("close", p.get("ltp")), p.get("oi")])
+        ws.append(row)
+
+    _style_workbook(wb)
+    ws["A1"].font = Font(bold=True, size=16)
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return send_file(buffer, as_attachment=True, download_name=f"Pratik_Analysis_Raw_Premium_{day}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # ============================================================
 # HEALTH
