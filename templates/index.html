@@ -1026,34 +1026,84 @@ function makeChart(canvasId, isCio=false){
     });
 }
 
+function niftyTimeValue(p,state){
+    if(p?.timestamp){
+        const t = new Date(p.timestamp).getTime();
+        if(Number.isFinite(t)) return t;
+    }
+    const day = state?.date || new Date().toISOString().slice(0,10);
+    return new Date(`${day}T${p?.time || "09:15"}:00+05:30`).getTime();
+}
+
+function aggregateNiftySeries(series,minutes){
+    const clean = [];
+    for(const p of (Array.isArray(series) ? series : [])){
+        const o = Number(p.open ?? p.price);
+        const h = Number(p.high ?? p.price);
+        const l = Number(p.low ?? p.price);
+        const c = Number(p.close ?? p.price);
+        if(![o,h,l,c].every(Number.isFinite)) continue;
+        clean.push({...p,open:o,high:h,low:l,close:c,price:c});
+    }
+    if(minutes <= 1) return clean;
+
+    const result=[];
+    let bucket=null;
+    for(const p of clean){
+        const parts=String(p.time||"").split(":");
+        if(parts.length!==2) continue;
+        const hh=Number(parts[0]), mm=Number(parts[1]);
+        if(!Number.isFinite(hh)||!Number.isFinite(mm)) continue;
+        const total=hh*60+mm;
+        const key=Math.floor(total/minutes)*minutes;
+        if(!bucket || bucket.key!==key){
+            if(bucket) result.push(bucket.point);
+            bucket={key,point:{...p}};
+        }else{
+            bucket.point.high=Math.max(Number(bucket.point.high),Number(p.high));
+            bucket.point.low=Math.min(Number(bucket.point.low),Number(p.low));
+            bucket.point.close=Number(p.close);
+            bucket.point.price=Number(p.close);
+            bucket.point.timestamp=p.timestamp;
+            bucket.point.time=p.time;
+        }
+    }
+    if(bucket) result.push(bucket.point);
+    return result;
+}
+
 function makeNiftyChart(){
     const bodyIsLight = document.body.classList.contains("light");
     const textColor = bodyIsLight ? "#617384" : "#8fa9bb";
     const gridColor = bodyIsLight ? "rgba(80,110,130,.12)" : "rgba(130,160,180,.18)";
     return new Chart(document.getElementById("chart-nifty"), {
-        type:"line",
-        data:{labels:[],datasets:[{label:"NIFTY Spot",data:[],borderColor:chartColors.ce,backgroundColor:chartColors.ce,borderWidth:2,pointRadius:0,pointHoverRadius:4,tension:.12}]},
+        type:"candlestick",
+        data:{
+            datasets:[{
+                label:"NIFTY OHLC",
+                data:[],
+                color:{up:"#44df8d",down:"#ff6b6b",unchanged:"#8fa9bb"},
+                borderColor:{up:"#44df8d",down:"#ff6b6b",unchanged:"#8fa9bb"}
+            }]
+        },
         options:{
             responsive:true,
             maintainAspectRatio:false,
             animation:false,
-            interaction:{mode:"index",intersect:false},
+            parsing:false,
+            interaction:{mode:"nearest",intersect:false},
             plugins:{
-                legend:{labels:{color:textColor}},
+                legend:{display:false},
+                tooltip:{callbacks:{label:(ctx)=>{const r=ctx.raw||{};return `O ${indianNumber(r.o)}  H ${indianNumber(r.h)}  L ${indianNumber(r.l)}  C ${indianNumber(r.c)}`;}}},
                 zoom:{
                     limits:{x:{min:"original",max:"original"}},
                     pan:{enabled:true,mode:"x"},
-                    zoom:{
-                        wheel:{enabled:true,speed:0.08},
-                        pinch:{enabled:true},
-                        drag:{enabled:false},
-                        mode:"x"
-                    }
+                    zoom:{wheel:{enabled:true,speed:0.08},pinch:{enabled:true},drag:{enabled:false},mode:"x"}
                 }
             },
             scales:{
-                x:{ticks:{color:textColor,maxTicksLimit:12},grid:{color:gridColor},title:{display:true,text:"Time",color:textColor}},
-                y:{ticks:{color:textColor,callback:(v)=>indianNumber(v)},grid:{color:gridColor},title:{display:true,text:"NIFTY Spot",color:textColor}}
+                x:{type:"time",time:{unit:"minute",displayFormats:{minute:"HH:mm"}},ticks:{color:textColor,maxTicksLimit:12},grid:{color:gridColor},title:{display:true,text:"Time",color:textColor}},
+                y:{ticks:{color:textColor,callback:(v)=>indianNumber(v)},grid:{color:gridColor},title:{display:true,text:"NIFTY 50",color:textColor}}
             }
         }
     });
@@ -1103,7 +1153,7 @@ function makePremiumChart(canvasId){
     const gridColor=bodyIsLight?"rgba(80,110,130,.12)":"rgba(130,160,180,.18)";
     return new Chart(document.getElementById(canvasId),{
         type:"candlestick",
-        data:{datasets:[{label:"Premium OHLC",data:[],borderColor:{up:"#44df8d",down:"#ff6b6b",unchanged:"#8fa9bb"},backgroundColors:{up:"rgba(68,223,141,.65)",down:"rgba(255,107,107,.65)",unchanged:"rgba(143,169,187,.45)"}}]},
+        data:{datasets:[{label:"Premium OHLC",data:[],color:{up:"#44df8d",down:"#ff6b6b",unchanged:"#8fa9bb"},borderColor:{up:"#44df8d",down:"#ff6b6b",unchanged:"#8fa9bb"}}]},
         options:{responsive:true,maintainAspectRatio:false,animation:false,parsing:false,interaction:{mode:"nearest",intersect:false},plugins:{legend:{display:false},tooltip:{callbacks:{label:(ctx)=>{const r=ctx.raw||{};return `O ${indianNumber(r.o)}  H ${indianNumber(r.h)}  L ${indianNumber(r.l)}  C ${indianNumber(r.c)}`;}},},zoom:{limits:{x:{min:"original",max:"original"}},pan:{enabled:true,mode:"x"},zoom:{wheel:{enabled:true,speed:.08},pinch:{enabled:true},mode:"x"}}},scales:{x:{type:"time",time:{unit:"minute",displayFormats:{minute:"HH:mm"}},ticks:{color:textColor,maxTicksLimit:10},grid:{color:gridColor},title:{display:true,text:"Time",color:textColor}},y:{ticks:{color:textColor,callback:(v)=>indianNumber(v)},grid:{color:gridColor},title:{display:true,text:"Option Premium",color:textColor}}}}
     });
 }
@@ -1299,10 +1349,15 @@ function updateNiftyPage(state){
     }else{ el.textContent = "Change: —"; el.className = "mini"; }
 
     const raw = safeSeries(state,"nifty");
-    const series = aggregateSeries(raw, selectedIntervals.nifty);
+    const series = aggregateNiftySeries(raw, selectedIntervals.nifty);
     const chart = charts.nifty;
-    chart.data.labels = series.map(p=>p.time || "");
-    chart.data.datasets[0].data = series.map(p=>Number(p.price));
+    chart.data.datasets[0].data = series.map(p=>({
+        x:niftyTimeValue(p,state),
+        o:Number(p.open ?? p.price),
+        h:Number(p.high ?? p.price),
+        l:Number(p.low ?? p.price),
+        c:Number(p.close ?? p.price)
+    }));
     chart.update("none");
     document.getElementById("empty-nifty").style.display = raw.length ? "none" : "flex";
 }
