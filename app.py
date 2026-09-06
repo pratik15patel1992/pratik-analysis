@@ -142,9 +142,15 @@ state = {
     # Strategy trade ledger. The live S1/S2/PNA engine will populate
     # these lists once the exact signal rules are activated.
     "strategies": {
-        "S1": {"trades": []},
-        "S2": {"trades": []},
-        "PNA": {"trades": []},
+        "S1": {"trades": [], "active": None, "signals": []},
+        "S2": {"trades": [], "active": None, "signals": []},
+        "PNA": {"trades": [], "active": None, "signals": []},
+    },
+    "strategy_engine": {
+        "enabled": True,
+        "version": "LIVE-OIC-CIO-1",
+        "last_eval_minute": None,
+        "metrics": {},
     },
 }
 
@@ -454,10 +460,11 @@ def load_day_history(day):
                 "plus100": None,
             },
             "strategies": {
-                "S1": {"trades": []},
-                "S2": {"trades": []},
-                "PNA": {"trades": []},
+                "S1": {"trades": [], "active": None, "signals": []},
+                "S2": {"trades": [], "active": None, "signals": []},
+                "PNA": {"trades": [], "active": None, "signals": []},
             },
+            "strategy_engine": {"enabled": True, "version": "LIVE-OIC-CIO-1", "last_eval_minute": None, "metrics": {}},
         },
     )
 
@@ -492,6 +499,7 @@ def save_current_history():
             "premium": state.get("premium", {}),
             "series": state.get("series", {}),
             "strategies": state.get("strategies", {}),
+            "strategy_engine": state.get("strategy_engine", {}),
             "saved_at": now_ist().isoformat(),
         }
 
@@ -1316,6 +1324,261 @@ def snapshot_current_premium_candles():
             )
 
 
+
+# ============================================================
+# LIVE S1 / S2 / PNA SIGNAL ENGINE
+# ============================================================
+# The engine uses the locked three opening strikes and the OIC/CIO rules:
+# - no entries during 09:15-09:30 observation period
+# - direction is measured from rolling 5-minute OI change at ATM-100/ATM/ATM+100
+# - bullish OI flow = PE OI rising while CE OI falls -> SELL PE
+# - bearish OI flow = CE OI rising while PE OI falls -> SELL CE
+# - CIO confirms bullish when CE negative-change is stronger than PE; bearish is the mirror
+# - S1 requires >=2/3 agreement + CIO for 3 consecutive one-minute readings
+# - S2 reacts to a visible momentum shift on >=2/3 strikes + CIO (earlier / no 3-read wait)
+# - PNA requires >=2/3 agreement, weighted MasterD clear (|MasterD| >= 35),
+#   CIO confirmation and 3 consecutive readings
+# - hard SL = 30 NIFTY points; all open trades time-exit at/after 14:45
+# Strategies are evaluated independently so S1/S2/PNA can coexist for research.
+
+STRATEGY_MASTER_CLEAR = 35.0
+STRATEGY_HARD_SL_POINTS = 30.0
+STRATEGY_MAX_TRADES_PER_STRATEGY = 3
+
+
+def _row_minutes(time_text):
+    try:
+        hh, mm = str(time_text).split(":")[:2]
+        return int(hh) * 60 + int(mm)
+    except Exception:
+        return None
+
+
+def _point_at_or_before(series, target_minutes):
+    best = None
+    for row in series or []:
+        m = _row_minutes(row.get("time"))
+        if m is None or m > target_minutes:
+            continue
+        if best is None or m > best[0]:
+            best = (m, row)
+    return best[1] if best else None
+
+
+def _five_minute_delta(series):
+    if not series:
+        return None
+    cur = series[-1]
+    cur_m = _row_minutes(cur.get("time"))
+    if cur_m is None:
+        return None
+    old = _point_at_or_before(series, cur_m - 5)
+    if old is None:
+        return None
+    return {
+        "ce": float(cur.get("ce", 0)) - float(old.get("ce", 0)),
+        "pe": float(cur.get("pe", 0)) - float(old.get("pe", 0)),
+    }
+
+
+def _dominance(delta):
+    if not delta:
+        return 0.0
+    ce, pe = float(delta["ce"]), float(delta["pe"])
+    den = abs(ce) + abs(pe)
+    return ((ce - pe) / den * 100.0) if den else 0.0
+
+
+def _flow_direction(delta):
+    if not delta:
+        return None
+    ce, pe = float(delta["ce"]), float(delta["pe"])
+    if pe > 0 and ce < 0:
+        return "PE"  # bullish -> sell PE
+    if ce > 0 and pe < 0:
+        return "CE"  # bearish -> sell CE
+    return None
+
+
+def _strategy_metrics():
+    deltas = {}
+    dirs = {}
+    dom = {}
+    for key in ("minus100", "atm", "plus100"):
+        d = _five_minute_delta(state.get("series", {}).get(key, []))
+        deltas[key] = d
+        dirs[key] = _flow_direction(d)
+        dom[key] = _dominance(d)
+
+    pe_votes = sum(1 for x in dirs.values() if x == "PE")
+    ce_votes = sum(1 for x in dirs.values() if x == "CE")
+    master = 0.25 * dom["minus100"] + 0.50 * dom["atm"] + 0.25 * dom["plus100"]
+
+    cio_rows = state.get("series", {}).get("cio", [])
+    cio = cio_rows[-1] if cio_rows else {}
+    cio_ce = float(cio.get("ce", 0) or 0)
+    cio_pe = float(cio.get("pe", 0) or 0)
+    cio_dir = "PE" if cio_ce < cio_pe else ("CE" if cio_pe < cio_ce else None)
+
+    return {
+        "time": minute_label(), "deltas": deltas, "directions": dirs,
+        "pe_votes": pe_votes, "ce_votes": ce_votes,
+        "master_d": round(master, 2), "cio_ce": int(cio_ce), "cio_pe": int(cio_pe),
+        "cio_direction": cio_dir,
+    }
+
+
+def _recent_direction_count(strategy_name, direction):
+    runtime = state.setdefault("strategy_engine", {}).setdefault("recent", {})
+    key = f"{strategy_name}:{direction}"
+    return int(runtime.get(key, 0))
+
+
+def _set_direction_count(strategy_name, direction, value):
+    runtime = state.setdefault("strategy_engine", {}).setdefault("recent", {})
+    runtime[f"{strategy_name}:{direction}"] = int(value)
+
+
+def _update_persistence(strategy_name, direction, condition):
+    other = "CE" if direction == "PE" else "PE"
+    if condition:
+        _set_direction_count(strategy_name, direction, _recent_direction_count(strategy_name, direction) + 1)
+    else:
+        _set_direction_count(strategy_name, direction, 0)
+    if condition:
+        _set_direction_count(strategy_name, other, 0)
+    return _recent_direction_count(strategy_name, direction)
+
+
+def _signal_record(strategy_name, action, option_type, price, reason, metrics):
+    return {
+        "time": minute_label(), "timestamp": now_ist().isoformat(), "strategy": strategy_name,
+        "action": action, "type": option_type, "nifty_level": round(float(price), 2),
+        "reason": reason, "master_d": metrics.get("master_d"),
+        "pe_votes": metrics.get("pe_votes"), "ce_votes": metrics.get("ce_votes"),
+        "cio_direction": metrics.get("cio_direction"),
+    }
+
+
+def _enter_strategy(strategy_name, option_type, price, reason, metrics):
+    s = state["strategies"][strategy_name]
+    if s.get("active") or len(s.get("trades", [])) >= STRATEGY_MAX_TRADES_PER_STRATEGY:
+        return
+    p = float(price)
+    sl = p - STRATEGY_HARD_SL_POINTS if option_type == "PE" else p + STRATEGY_HARD_SL_POINTS
+    trade = {
+        "date": today_key(), "type": option_type, "side": f"SELL {option_type}",
+        "entry_time": minute_label(), "entry_timestamp": now_ist().isoformat(),
+        "entry_level": round(p, 2), "sl_level": round(sl, 2), "exit_time": None,
+        "exit_level": None, "points": None, "mae": 0.0, "mfe": 0.0,
+        "sl_hit": False, "result": "OPEN", "exit_reason": None,
+        "entry_reason": reason, "master_d_entry": metrics.get("master_d"),
+    }
+    s["active"] = trade
+    s.setdefault("signals", []).append(_signal_record(strategy_name, "ENTRY", option_type, p, reason, metrics))
+
+
+def _update_excursions(trade, price):
+    p, e = float(price), float(trade["entry_level"])
+    if trade.get("type") == "PE":
+        favorable, adverse = max(0.0, p - e), max(0.0, e - p)
+    else:
+        favorable, adverse = max(0.0, e - p), max(0.0, p - e)
+    trade["mfe"] = round(max(float(trade.get("mfe") or 0), favorable), 2)
+    trade["mae"] = round(max(float(trade.get("mae") or 0), adverse), 2)
+
+
+def _exit_strategy(strategy_name, price, reason, metrics, sl_hit=False):
+    s = state["strategies"][strategy_name]
+    trade = s.get("active")
+    if not trade:
+        return
+    p, e = float(price), float(trade["entry_level"])
+    points = p - e if trade.get("type") == "PE" else e - p
+    trade.update({
+        "exit_time": minute_label(), "exit_timestamp": now_ist().isoformat(),
+        "exit_level": round(p, 2), "points": round(points, 2), "sl_hit": bool(sl_hit),
+        "result": "WIN" if points > 0 else ("LOSS" if points < 0 else "FLAT"),
+        "exit_reason": reason,
+    })
+    s.setdefault("trades", []).append(dict(trade))
+    s.setdefault("signals", []).append(_signal_record(strategy_name, "EXIT", trade.get("type"), p, reason, metrics))
+    s["active"] = None
+    _set_direction_count(strategy_name, "PE", 0)
+    _set_direction_count(strategy_name, "CE", 0)
+
+
+def evaluate_live_strategies():
+    """Evaluate once per completed/snapshotted minute from the recorded OIC+CIO series."""
+    price = state.get("nifty", {}).get("price")
+    if price is None or not baseline_ready:
+        return
+    now_m = _row_minutes(minute_label())
+    if now_m is None:
+        return
+    engine = state.setdefault("strategy_engine", {})
+    if engine.get("last_eval_minute") == minute_label():
+        return
+    engine["last_eval_minute"] = minute_label()
+
+    metrics = _strategy_metrics()
+    engine["metrics"] = metrics
+    p = float(price)
+
+    # First manage any active positions. Hard SL has priority.
+    for name in ("S1", "S2", "PNA"):
+        trade = state["strategies"][name].get("active")
+        if not trade:
+            continue
+        _update_excursions(trade, p)
+        if (trade["type"] == "PE" and p <= float(trade["sl_level"])) or (trade["type"] == "CE" and p >= float(trade["sl_level"])):
+            _exit_strategy(name, p, "30-POINT HARD SL", metrics, True)
+            continue
+        if now_m >= 14 * 60 + 45:
+            _exit_strategy(name, p, "14:45 TIME EXIT", metrics, False)
+            continue
+
+        opposite = "CE" if trade["type"] == "PE" else "PE"
+        votes = metrics["ce_votes"] if opposite == "CE" else metrics["pe_votes"]
+        cio_ok = metrics["cio_direction"] == opposite
+        if name == "S1":
+            rev_count = _update_persistence("S1_EXIT", opposite, votes >= 2)
+            # Locked S1 exit: 3-reading OIC reversal OR CIO no longer supports current trade.
+            if rev_count >= 3 or metrics["cio_direction"] not in (trade["type"], None):
+                _exit_strategy(name, p, "OIC/CIO REVERSAL", metrics, False)
+        elif name == "S2":
+            if votes >= 2 and cio_ok:
+                _exit_strategy(name, p, "MOMENTUM REVERSAL", metrics, False)
+        else:  # PNA
+            master_opposite = metrics["master_d"] >= STRATEGY_MASTER_CLEAR if opposite == "CE" else metrics["master_d"] <= -STRATEGY_MASTER_CLEAR
+            if votes >= 2 and cio_ok and master_opposite:
+                _exit_strategy(name, p, "MASTER OIC/CIO REVERSAL", metrics, False)
+
+    # Observation window: collect data but no new entries until after 09:30.
+    if now_m < 9 * 60 + 30 or now_m >= 14 * 60 + 45:
+        return
+
+    for direction in ("PE", "CE"):
+        votes = metrics["pe_votes"] if direction == "PE" else metrics["ce_votes"]
+        cio_ok = metrics["cio_direction"] == direction
+        common = votes >= 2 and cio_ok
+
+        # S2: earliest visible >=2/3 momentum shift with CIO support.
+        if common and not state["strategies"]["S2"].get("active"):
+            _enter_strategy("S2", direction, p, f"Momentum shift {votes}/3 + CIO", metrics)
+
+        # S1: same clear dominance must persist for 3 consecutive 1-minute readings.
+        s1_count = _update_persistence("S1", direction, common)
+        if s1_count >= 3 and not state["strategies"]["S1"].get("active"):
+            _enter_strategy("S1", direction, p, f"OIC dominance {votes}/3 + CIO, 3 readings", metrics)
+
+        # PNA: multi-layer confirmation with weighted MasterD clear + persistence.
+        master_ok = metrics["master_d"] <= -STRATEGY_MASTER_CLEAR if direction == "PE" else metrics["master_d"] >= STRATEGY_MASTER_CLEAR
+        pna_cond = common and master_ok
+        pna_count = _update_persistence("PNA", direction, pna_cond)
+        if pna_count >= 3 and not state["strategies"]["PNA"].get("active"):
+            _enter_strategy("PNA", direction, p, f"{votes}/3 + MasterD {metrics['master_d']:+.1f} + CIO, 3 readings", metrics)
+
 def make_snapshot():
     if not state.get("connected"):
         return
@@ -1354,6 +1617,9 @@ def make_snapshot():
                 state["series"]["cio"],
                 point,
             )
+
+        # Generate live S1/S2/PNA entries/exits from the same minute snapshot.
+        evaluate_live_strategies()
 
         state["last_update"] = (
             now_ist().isoformat()
@@ -1805,6 +2071,13 @@ def restore_today_history():
             trades = strategy_data.get("trades") or []
             if isinstance(trades, list):
                 state["strategies"][strategy_name]["trades"] = trades
+            state["strategies"][strategy_name]["active"] = strategy_data.get("active")
+            signals = strategy_data.get("signals") or []
+            if isinstance(signals, list):
+                state["strategies"][strategy_name]["signals"] = signals
+        saved_engine = saved.get("strategy_engine") or {}
+        if isinstance(saved_engine, dict):
+            state["strategy_engine"].update(saved_engine)
 
 
 init_db()
