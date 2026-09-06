@@ -6,6 +6,11 @@
     <title>Pratik Analysis LIVE OI</title>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@3.5.0/build/global/luxon.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.2.1/dist/chartjs-chart-financial.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
 
     <style>
         :root{
@@ -447,6 +452,26 @@
         .reportsControls input{display:block;margin-top:4px;background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:9px;padding:8px}
         .reportSummary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
         @media(max-width:900px){.niftyHeader,.strategyGrid,.reportSummary{grid-template-columns:1fr}.niftyChartBox{height:340px}}
+
+        /* MARKET INTELLIGENCE — premium analytics */
+        .miTop{display:grid;grid-template-columns:1.3fr 1fr .85fr .85fr .85fr;gap:10px;margin-bottom:10px}
+        .miState{font-size:25px;font-weight:900;letter-spacing:.4px}
+        .miMetric{font-size:24px;font-weight:900}
+        .miPremiumGrid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+        .premiumCard{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:12px;box-shadow:var(--shadow);min-height:330px;position:relative}
+        .premiumBox{height:245px;position:relative}
+        .premiumHeadMeta{display:flex;gap:10px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin-top:5px}
+        .premiumHeadMeta b{color:var(--text)}
+        .miToolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:10px 12px;margin-bottom:10px}
+        .miToolbar label{font-size:12px;color:var(--muted)}
+        .miFoot{margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+        .miStateBar{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:8px}
+        .miStateBar span{padding:7px 4px;text-align:center;border:1px solid var(--border);border-radius:8px;font-size:10px;color:var(--muted);background:var(--panel2)}
+        .premiumCard.full{position:fixed;inset:10px;z-index:9999;min-height:0;background:var(--panel)}
+        .premiumCard.full .premiumBox{height:calc(100vh - 150px)}
+        .zoomHint{font-size:10px;color:var(--muted);margin-top:4px}
+        @media(max-width:1200px){.miTop{grid-template-columns:1fr 1fr 1fr}.miPremiumGrid{grid-template-columns:1fr 1fr}}
+        @media(max-width:800px){.miTop,.miPremiumGrid,.miFoot{grid-template-columns:1fr}.premiumBox{height:260px}}
     </style>
 </head>
 
@@ -479,6 +504,7 @@
     <nav class="pageTabs">
         <button id="tabOic" class="pageTab active" type="button" onclick="showPage('oic')">OIC + CIO</button>
         <button id="tabNifty" class="pageTab" type="button" onclick="showPage('nifty')">NIFTY</button>
+        <button id="tabMarket" class="pageTab" type="button" onclick="showPage('market')">MARKET INTELLIGENCE</button>
         <button id="tabReports" class="pageTab" type="button" onclick="showPage('reports')">REPORTS</button>
     </nav>
 
@@ -680,6 +706,67 @@
         <div class="notice">Signal arrows and trade rows will be enabled after the exact numerical S1/S2/PNA rules are frozen. NIFTY minute data is recorded from this deployment onward.</div>
     </div>
 
+
+    <div id="pageMarket" class="pageView">
+        <section class="miTop">
+            <div class="card">
+                <div class="cardTitle">NIFTY 50 Snapshot</div>
+                <div class="big" id="miNiftyPrice">—</div>
+                <div class="mini" id="miNiftyChange">Change: —</div>
+                <div class="mini" id="miNiftyOhlc">O: — • H: — • L: — • PC: —</div>
+            </div>
+            <div class="card">
+                <div class="cardTitle">Overall Market State</div>
+                <div class="miState yellow" id="miMarketState">WAITING FOR DATA</div>
+                <div class="mini" id="miStateText">Live classification will use OIC + CIO after the scoring engine is activated.</div>
+                <div class="miStateBar"><span>Bearish</span><span>Mild Bear</span><span>Sideways</span><span>Mild Bull</span><span>Bullish</span></div>
+            </div>
+            <div class="card"><div class="cardTitle">Opening ATM</div><div class="miMetric purple" id="miAtm">—</div><div class="mini" id="miExpiry">Expiry: —</div></div>
+            <div class="card"><div class="cardTitle">India VIX</div><div class="miMetric cyan" id="miVix">—</div><div class="mini" id="miVixBand">—</div></div>
+            <div class="card"><div class="cardTitle">Premium Recorder</div><div class="miMetric positive" id="miRecorder">0 / 6</div><div class="mini" id="miRecorderMeta">Waiting for option ticks</div></div>
+        </section>
+
+        <div class="miToolbar">
+            <label for="marketHistoryDate">Session:</label>
+            <select id="marketHistoryDate" onchange="onMarketSessionChange()"><option value="">Loading dates...</option></select>
+            <button type="button" onclick="showLiveTodayFromMarket()">Live Today</button>
+            <span id="marketModeChip" class="liveChip">LIVE VIEW</span>
+            <span id="marketSessionMessage" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+
+        <section class="miPremiumGrid">
+            <article class="premiumCard" id="card-premium-minus100-CE">
+                <div class="chartHeader"><div><h3 id="premiumTitle-minus100-CE">ATM -100 CE</h3><div class="premiumHeadMeta" id="premiumMeta-minus100-CE">LTP: — • OI: —</div></div><div class="chartControls"><button onclick="premiumFullView('card-premium-minus100-CE')">Full View</button><button onclick="resetPremiumZoom('minus100-CE')">Reset Zoom</button><button class="active" data-group="premium-minus100-CE" onclick="setPremiumInterval('minus100-CE',1,this)">1m</button><button data-group="premium-minus100-CE" onclick="setPremiumInterval('minus100-CE',3,this)">3m</button><button data-group="premium-minus100-CE" onclick="setPremiumInterval('minus100-CE',5,this)">5m</button><button data-group="premium-minus100-CE" onclick="setPremiumInterval('minus100-CE',15,this)">15m</button></div></div>
+                <div class="premiumBox"><canvas id="premium-minus100-CE"></canvas></div><div class="empty" id="empty-premium-minus100-CE">Premium data will appear after live market ticks are recorded.</div><div class="chartStats" id="stats-premium-minus100-CE"></div><div class="zoomHint">Mouse wheel = zoom • drag = pan • Reset Zoom = full session</div>
+            </article>
+            <article class="premiumCard" id="card-premium-atm-CE">
+                <div class="chartHeader"><div><h3 id="premiumTitle-atm-CE">ATM CE</h3><div class="premiumHeadMeta" id="premiumMeta-atm-CE">LTP: — • OI: —</div></div><div class="chartControls"><button onclick="premiumFullView('card-premium-atm-CE')">Full View</button><button onclick="resetPremiumZoom('atm-CE')">Reset Zoom</button><button class="active" data-group="premium-atm-CE" onclick="setPremiumInterval('atm-CE',1,this)">1m</button><button data-group="premium-atm-CE" onclick="setPremiumInterval('atm-CE',3,this)">3m</button><button data-group="premium-atm-CE" onclick="setPremiumInterval('atm-CE',5,this)">5m</button><button data-group="premium-atm-CE" onclick="setPremiumInterval('atm-CE',15,this)">15m</button></div></div>
+                <div class="premiumBox"><canvas id="premium-atm-CE"></canvas></div><div class="empty" id="empty-premium-atm-CE">Premium data will appear after live market ticks are recorded.</div><div class="chartStats" id="stats-premium-atm-CE"></div><div class="zoomHint">Mouse wheel = zoom • drag = pan • Reset Zoom = full session</div>
+            </article>
+            <article class="premiumCard" id="card-premium-plus100-CE">
+                <div class="chartHeader"><div><h3 id="premiumTitle-plus100-CE">ATM +100 CE</h3><div class="premiumHeadMeta" id="premiumMeta-plus100-CE">LTP: — • OI: —</div></div><div class="chartControls"><button onclick="premiumFullView('card-premium-plus100-CE')">Full View</button><button onclick="resetPremiumZoom('plus100-CE')">Reset Zoom</button><button class="active" data-group="premium-plus100-CE" onclick="setPremiumInterval('plus100-CE',1,this)">1m</button><button data-group="premium-plus100-CE" onclick="setPremiumInterval('plus100-CE',3,this)">3m</button><button data-group="premium-plus100-CE" onclick="setPremiumInterval('plus100-CE',5,this)">5m</button><button data-group="premium-plus100-CE" onclick="setPremiumInterval('plus100-CE',15,this)">15m</button></div></div>
+                <div class="premiumBox"><canvas id="premium-plus100-CE"></canvas></div><div class="empty" id="empty-premium-plus100-CE">Premium data will appear after live market ticks are recorded.</div><div class="chartStats" id="stats-premium-plus100-CE"></div><div class="zoomHint">Mouse wheel = zoom • drag = pan • Reset Zoom = full session</div>
+            </article>
+            <article class="premiumCard" id="card-premium-minus100-PE">
+                <div class="chartHeader"><div><h3 id="premiumTitle-minus100-PE">ATM -100 PE</h3><div class="premiumHeadMeta" id="premiumMeta-minus100-PE">LTP: — • OI: —</div></div><div class="chartControls"><button onclick="premiumFullView('card-premium-minus100-PE')">Full View</button><button onclick="resetPremiumZoom('minus100-PE')">Reset Zoom</button><button class="active" data-group="premium-minus100-PE" onclick="setPremiumInterval('minus100-PE',1,this)">1m</button><button data-group="premium-minus100-PE" onclick="setPremiumInterval('minus100-PE',3,this)">3m</button><button data-group="premium-minus100-PE" onclick="setPremiumInterval('minus100-PE',5,this)">5m</button><button data-group="premium-minus100-PE" onclick="setPremiumInterval('minus100-PE',15,this)">15m</button></div></div>
+                <div class="premiumBox"><canvas id="premium-minus100-PE"></canvas></div><div class="empty" id="empty-premium-minus100-PE">Premium data will appear after live market ticks are recorded.</div><div class="chartStats" id="stats-premium-minus100-PE"></div><div class="zoomHint">Mouse wheel = zoom • drag = pan • Reset Zoom = full session</div>
+            </article>
+            <article class="premiumCard" id="card-premium-atm-PE">
+                <div class="chartHeader"><div><h3 id="premiumTitle-atm-PE">ATM PE</h3><div class="premiumHeadMeta" id="premiumMeta-atm-PE">LTP: — • OI: —</div></div><div class="chartControls"><button onclick="premiumFullView('card-premium-atm-PE')">Full View</button><button onclick="resetPremiumZoom('atm-PE')">Reset Zoom</button><button class="active" data-group="premium-atm-PE" onclick="setPremiumInterval('atm-PE',1,this)">1m</button><button data-group="premium-atm-PE" onclick="setPremiumInterval('atm-PE',3,this)">3m</button><button data-group="premium-atm-PE" onclick="setPremiumInterval('atm-PE',5,this)">5m</button><button data-group="premium-atm-PE" onclick="setPremiumInterval('atm-PE',15,this)">15m</button></div></div>
+                <div class="premiumBox"><canvas id="premium-atm-PE"></canvas></div><div class="empty" id="empty-premium-atm-PE">Premium data will appear after live market ticks are recorded.</div><div class="chartStats" id="stats-premium-atm-PE"></div><div class="zoomHint">Mouse wheel = zoom • drag = pan • Reset Zoom = full session</div>
+            </article>
+            <article class="premiumCard" id="card-premium-plus100-PE">
+                <div class="chartHeader"><div><h3 id="premiumTitle-plus100-PE">ATM +100 PE</h3><div class="premiumHeadMeta" id="premiumMeta-plus100-PE">LTP: — • OI: —</div></div><div class="chartControls"><button onclick="premiumFullView('card-premium-plus100-PE')">Full View</button><button onclick="resetPremiumZoom('plus100-PE')">Reset Zoom</button><button class="active" data-group="premium-plus100-PE" onclick="setPremiumInterval('plus100-PE',1,this)">1m</button><button data-group="premium-plus100-PE" onclick="setPremiumInterval('plus100-PE',3,this)">3m</button><button data-group="premium-plus100-PE" onclick="setPremiumInterval('plus100-PE',5,this)">5m</button><button data-group="premium-plus100-PE" onclick="setPremiumInterval('plus100-PE',15,this)">15m</button></div></div>
+                <div class="premiumBox"><canvas id="premium-plus100-PE"></canvas></div><div class="empty" id="empty-premium-plus100-PE">Premium data will appear after live market ticks are recorded.</div><div class="chartStats" id="stats-premium-plus100-PE"></div><div class="zoomHint">Mouse wheel = zoom • drag = pan • Reset Zoom = full session</div>
+            </article>
+        </section>
+
+        <section class="miFoot">
+            <div class="card"><div class="cardTitle">Premium Research Scope</div><div class="mini">All three strikes are recorded simultaneously for every future S1 / S2 / PNA signal. Premium P&amp;L will be calculated separately for ATM -100, ATM and ATM +100 using the exact CE/PE side of the signal.</div></div>
+            <div class="card"><div class="cardTitle">Downloads</div><div class="mini">Premium Entry / Exit summary and Raw Premium OHLC + OI Excel downloads will be activated in the Excel deployment stage.</div></div>
+        </section>
+    </div>
+
     <div id="pageReports" class="pageView">
         <div class="card">
             <div class="chartHeader"><div><h3>Strategy Reports</h3><p>Multi-day S1 vs S2 vs PNA performance summary</p></div></div>
@@ -714,7 +801,13 @@ const selectedIntervals = {
     atm: 1,
     minus100: 1,
     plus100: 1,
-    cio: 1
+    cio: 1,
+    "premium-minus100-CE": 1,
+    "premium-atm-CE": 1,
+    "premium-plus100-CE": 1,
+    "premium-minus100-PE": 1,
+    "premium-atm-PE": 1,
+    "premium-plus100-PE": 1
 };
 
 const charts = {};
@@ -895,12 +988,134 @@ function makeNiftyChart(){
     });
 }
 
+
+function premiumSeries(state,key,type){
+    const rows=state?.series?.premium?.[key]?.[type];
+    return Array.isArray(rows)?rows:[];
+}
+
+function aggregatePremiumSeries(series,minutes){
+    if(minutes<=1) return series.slice();
+    const result=[]; let bucket=null;
+    for(const p of series){
+        const parts=String(p.time||"").split(":");
+        if(parts.length!==2) continue;
+        const hh=Number(parts[0]), mm=Number(parts[1]);
+        const total=hh*60+mm; if(!Number.isFinite(total)) continue;
+        const key=Math.floor(total/minutes)*minutes;
+        const o=Number(p.open), h=Number(p.high), l=Number(p.low), c=Number(p.close ?? p.price), oi=Number(p.oi);
+        if(![o,h,l,c].every(Number.isFinite)) continue;
+        if(!bucket || bucket.key!==key){
+            if(bucket) result.push(bucket.point);
+            bucket={key,point:{time:p.time,timestamp:p.timestamp,open:o,high:h,low:l,close:c,price:c,oi:Number.isFinite(oi)?oi:null}};
+        }else{
+            bucket.point.high=Math.max(bucket.point.high,h);
+            bucket.point.low=Math.min(bucket.point.low,l);
+            bucket.point.close=c; bucket.point.price=c; bucket.point.timestamp=p.timestamp;
+            if(Number.isFinite(oi)) bucket.point.oi=oi;
+        }
+    }
+    if(bucket) result.push(bucket.point);
+    return result;
+}
+
+function premiumTimeValue(p,state){
+    if(p.timestamp){ const t=new Date(p.timestamp).getTime(); if(Number.isFinite(t)) return t; }
+    const day=state?.date || new Date().toISOString().slice(0,10);
+    const t=new Date(`${day}T${p.time || "09:15"}:00+05:30`).getTime();
+    return t;
+}
+
+function makePremiumChart(canvasId){
+    const bodyIsLight=document.body.classList.contains("light");
+    const textColor=bodyIsLight?"#617384":"#8fa9bb";
+    const gridColor=bodyIsLight?"rgba(80,110,130,.12)":"rgba(130,160,180,.18)";
+    return new Chart(document.getElementById(canvasId),{
+        type:"candlestick",
+        data:{datasets:[{label:"Premium OHLC",data:[],borderColor:{up:"#44df8d",down:"#ff6b6b",unchanged:"#8fa9bb"},backgroundColors:{up:"rgba(68,223,141,.65)",down:"rgba(255,107,107,.65)",unchanged:"rgba(143,169,187,.45)"}}]},
+        options:{responsive:true,maintainAspectRatio:false,animation:false,parsing:false,interaction:{mode:"nearest",intersect:false},plugins:{legend:{display:false},tooltip:{callbacks:{label:(ctx)=>{const r=ctx.raw||{};return `O ${indianNumber(r.o)}  H ${indianNumber(r.h)}  L ${indianNumber(r.l)}  C ${indianNumber(r.c)}`;}},},zoom:{limits:{x:{min:"original",max:"original"}},pan:{enabled:true,mode:"x"},zoom:{wheel:{enabled:true,speed:.08},pinch:{enabled:true},mode:"x"}}},scales:{x:{type:"time",time:{unit:"minute",displayFormats:{minute:"HH:mm"}},ticks:{color:textColor,maxTicksLimit:10},grid:{color:gridColor},title:{display:true,text:"Time",color:textColor}},y:{ticks:{color:textColor,callback:(v)=>indianNumber(v)},grid:{color:gridColor},title:{display:true,text:"Option Premium",color:textColor}}}}
+    });
+}
+
+const premiumDefs=[
+    {id:"minus100-CE",key:"minus100",type:"CE",label:"ATM -100 CE"},
+    {id:"atm-CE",key:"atm",type:"CE",label:"ATM CE"},
+    {id:"plus100-CE",key:"plus100",type:"CE",label:"ATM +100 CE"},
+    {id:"minus100-PE",key:"minus100",type:"PE",label:"ATM -100 PE"},
+    {id:"atm-PE",key:"atm",type:"PE",label:"ATM PE"},
+    {id:"plus100-PE",key:"plus100",type:"PE",label:"ATM +100 PE"}
+];
+
+function updatePremiumChart(def,state){
+    const raw=premiumSeries(state,def.key,def.type);
+    const mins=selectedIntervals[`premium-${def.id}`]||1;
+    const series=aggregatePremiumSeries(raw,mins);
+    const chart=charts[`premium-${def.id}`]; if(!chart) return;
+    chart.data.datasets[0].data=series.map(p=>({x:premiumTimeValue(p,state),o:Number(p.open),h:Number(p.high),l:Number(p.low),c:Number(p.close ?? p.price)}));
+    chart.update("none");
+    const empty=document.getElementById(`empty-premium-${def.id}`); if(empty) empty.style.display=raw.length?"none":"flex";
+    const last=raw[raw.length-1]||{};
+    const strike=state?.premium?.[def.key] ?? (state?.opening_atm ? state.opening_atm + (def.key==="minus100"?-100:def.key==="plus100"?100:0):null);
+    document.getElementById(`premiumTitle-${def.id}`).textContent=`${def.label}${strike?` (${strike})`:""}`;
+    document.getElementById(`premiumMeta-${def.id}`).innerHTML=`LTP: <b>${indianNumber(last.close ?? last.price)}</b> • OI: <b>${indianNumber(last.oi)}</b> • TF: <b>${mins}m</b>`;
+    const box=document.getElementById(`stats-premium-${def.id}`);
+    if(box){
+        if(!raw.length){box.innerHTML="<span>Day Range: no data</span>";}
+        else{
+            const highs=raw.map(p=>Number(p.high)).filter(Number.isFinite), lows=raw.map(p=>Number(p.low)).filter(Number.isFinite);
+            box.innerHTML=`<span>Day Range: ${raw[0].time||"—"} – ${raw[raw.length-1].time||"—"}</span><span>High: ${indianNumber(Math.max(...highs))} • Low: ${indianNumber(Math.min(...lows))}</span>`;
+        }
+    }
+}
+
+function updateMarketPage(state){
+    const n=state?.nifty||{}, v=state?.vix||{};
+    document.getElementById("miNiftyPrice").textContent=indianNumber(n.price);
+    const ch=Number(n.change), cp=Number(n.change_pct);
+    const cel=document.getElementById("miNiftyChange");
+    if(Number.isFinite(ch)&&Number.isFinite(cp)){cel.textContent=`Change: ${signed(ch,2)} (${signed(cp,3)}%)`;cel.className="mini "+(ch>=0?"positive":"negative");}else{cel.textContent="Change: —";cel.className="mini";}
+    document.getElementById("miNiftyOhlc").textContent=`O: ${indianNumber(n.open)} • H: ${indianNumber(n.high)} • L: ${indianNumber(n.low)} • PC: ${indianNumber(n.previous_close)}`;
+    document.getElementById("miAtm").textContent=state?.opening_atm ?? "—";
+    document.getElementById("miExpiry").textContent=`Expiry: ${state?.expiry || "—"}`;
+    document.getElementById("miVix").textContent=indianNumber(v.price);
+    document.getElementById("miVixBand").textContent=v.range || "—";
+    let active=0,totalPoints=0;
+    for(const def of premiumDefs){const raw=premiumSeries(state,def.key,def.type);if(raw.length){active++;totalPoints+=raw.length;}updatePremiumChart(def,state);}
+    document.getElementById("miRecorder").textContent=`${active} / 6`;
+    document.getElementById("miRecorderMeta").textContent=active?`${totalPoints} premium minute candle records available across contracts`:`Waiting for option ticks`;
+}
+
+function setPremiumInterval(id,minutes,btn){
+    selectedIntervals[`premium-${id}`]=minutes;
+    document.querySelectorAll(`button[data-group="premium-${id}"]`).forEach(b=>b.classList.remove("active"));
+    btn.classList.add("active");
+    const def=premiumDefs.find(d=>d.id===id); if(def&&displayedState) updatePremiumChart(def,displayedState);
+}
+
+function resetPremiumZoom(id){const c=charts[`premium-${id}`];if(c&&c.resetZoom)c.resetZoom();}
+function premiumFullView(cardId){const card=document.getElementById(cardId);card.classList.toggle("full");setTimeout(()=>Object.values(charts).forEach(c=>c.resize()),50);}
+
+function syncMarketDateSelectTo(day){
+    if(!day) return; const select=document.getElementById("marketHistoryDate"); if(!select)return;
+    if(![...select.options].some(o=>o.value===day)){const op=document.createElement("option");op.value=day;op.textContent=day;select.prepend(op);} select.value=day;
+}
+
+async function onMarketSessionChange(){
+    const day=document.getElementById("marketHistoryDate").value;
+    const main=document.getElementById("historyDate");
+    if(main){main.value=day;await onSessionChange();}
+    document.getElementById("marketModeChip").textContent=liveMode?"LIVE VIEW":"HISTORICAL VIEW";
+    document.getElementById("marketSessionMessage").textContent=liveMode?"":`Historical session loaded: ${day}`;
+}
+function showLiveTodayFromMarket(){showLiveToday();syncMarketDateSelectTo(currentState?.date);document.getElementById("marketModeChip").textContent="LIVE VIEW";document.getElementById("marketSessionMessage").textContent="";}
+
 function initCharts(){
     charts.nifty = makeNiftyChart();
     charts.atm = makeChart("chart-atm");
     charts.minus100 = makeChart("chart-minus100");
     charts.plus100 = makeChart("chart-plus100");
     charts.cio = makeChart("chart-cio", true);
+    for(const def of premiumDefs){ charts[`premium-${def.id}`] = makePremiumChart(`premium-${def.id}`); }
 }
 
 function updateChart(key, state){
@@ -1063,7 +1278,9 @@ function renderState(state){
     updateChart("cio", state);
     updateSessionInfo(state);
     updateNiftyPage(state);
+    updateMarketPage(state);
     syncNiftyDateSelectTo(state?.date);
+    syncMarketDateSelectTo(state?.date);
 }
 
 async function loadLive(){
@@ -1128,6 +1345,8 @@ async function loadHistoryDates(){
         const nselect = document.getElementById("niftyHistoryDate");
         nselect.innerHTML = select.innerHTML;
         syncNiftyDateSelectTo(currentState?.date || unique[0]);
+        const mselect = document.getElementById("marketHistoryDate");
+        if(mselect){mselect.innerHTML = select.innerHTML; syncMarketDateSelectTo(currentState?.date || unique[0]);}
 
     }catch(err){
         document.getElementById("sessionMessage").textContent =
@@ -1241,7 +1460,7 @@ function downloadCIO(){
 }
 
 function showPage(name){
-    for(const id of ["oic","nifty","reports"]){
+    for(const id of ["oic","nifty","market","reports"]){
         document.getElementById(`page${id.charAt(0).toUpperCase()+id.slice(1)}`).classList.toggle("active", id===name);
         document.getElementById(`tab${id.charAt(0).toUpperCase()+id.slice(1)}`).classList.toggle("active", id===name);
     }
@@ -1334,6 +1553,7 @@ function toggleTheme(){
         updateChart("plus100", displayedState);
         updateChart("cio", displayedState);
         updateNiftyPage(displayedState);
+        updateMarketPage(displayedState);
     }
 }
 
