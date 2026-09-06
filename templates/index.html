@@ -767,8 +767,17 @@
         </section>
 
         <section class="miFoot">
-            <div class="card"><div class="cardTitle">Premium Research Scope</div><div class="mini">All three strikes are recorded simultaneously for every future S1 / S2 / PNA signal. Premium P&amp;L will be calculated separately for ATM -100, ATM and ATM +100 using the exact CE/PE side of the signal.</div></div>
-            <div class="card"><div class="cardTitle">Downloads</div><div class="mini">Premium Entry / Exit summary and Raw Premium OHLC + OI Excel downloads will be activated in the Excel deployment stage.</div></div>
+            <div class="card"><div class="cardTitle">Premium Research Scope</div><div class="mini">All three strikes are recorded simultaneously for every future S1 / S2 / PNA signal. Premium P&amp;L is calculated separately for ATM -100, ATM and ATM +100 using the exact CE/PE side of the signal.</div></div>
+            <div class="card downloadBox">
+                <div class="downloadText">
+                    <h3>Option Premium Excel Downloads</h3>
+                    <p>Performance report compares S1 / S2 / PNA across ATM -100, ATM and ATM +100. Raw data contains 1-minute OHLC + OI for all six option contracts.</p>
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+                    <button class="downloadBtn" type="button" onclick="downloadPremiumPerformance()">⬇ Premium Performance Report</button>
+                    <button class="downloadBtn" type="button" onclick="downloadRawPremium()">⬇ Raw Premium Data</button>
+                </div>
+            </div>
         </section>
     </div>
 
@@ -1478,6 +1487,36 @@ function fullView(cardId){
     setTimeout(() => {
         Object.values(charts).forEach(c => c.resize());
     }, 50);
+}
+
+function selectedMarketDay(){
+    const select = document.getElementById("marketHistoryDate");
+    if(select && select.value) return select.value;
+    if(displayedState?.date) return displayedState.date;
+    if(currentState?.date) return currentState.date;
+    return null;
+}
+
+function downloadRawPremium(){
+    const day = selectedMarketDay();
+    if(!day){
+        alert("No Market Intelligence session date available for download.");
+        return;
+    }
+    window.location.href = "/api/download/premium/raw/" + encodeURIComponent(day);
+}
+
+function downloadPremiumPerformance(){
+    const day = selectedMarketDay();
+    if(!day){
+        alert("No Market Intelligence session date available for download.");
+        return;
+    }
+
+    // Use the selected Market Intelligence session as the default report range.
+    // Multi-day premium performance can later use a dedicated From / To selector.
+    window.location.href =
+        `/api/download/premium/reports?from=${encodeURIComponent(day)}&to=${encodeURIComponent(day)}`;
 }
 
 function downloadCIO(){
