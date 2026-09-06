@@ -453,6 +453,19 @@
         .reportSummary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
         @media(max-width:900px){.niftyHeader,.strategyGrid,.reportSummary{grid-template-columns:1fr}.niftyChartBox{height:340px}}
 
+
+        .miInsightGrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+        .miTable{width:100%;border-collapse:collapse;font-size:12px}
+        .miTable th,.miTable td{padding:8px 7px;border-bottom:1px solid var(--border);text-align:right}
+        .miTable th:first-child,.miTable td:first-child{text-align:left}
+        .miTable th{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+        .pressureTrack{display:flex;align-items:center;gap:7px;justify-content:flex-end}
+        .pressureBar{width:72px;height:8px;background:var(--panel2);border:1px solid var(--border);border-radius:999px;overflow:hidden}
+        .pressureFill{height:100%;border-radius:999px}
+        .pressureFill.ce{background:var(--red)} .pressureFill.pe{background:var(--green)}
+        .pressureCE{color:var(--red);font-weight:800}.pressurePE{color:var(--green);font-weight:800}
+        .pressureBalanced{color:var(--yellow);font-weight:800}
+
         /* MARKET INTELLIGENCE — premium analytics */
         .miTop{display:grid;grid-template-columns:1.3fr 1fr .85fr .85fr .85fr;gap:10px;margin-bottom:10px}
         .miState{font-size:25px;font-weight:900;letter-spacing:.4px}
@@ -471,7 +484,7 @@
         .premiumCard.full .premiumBox{height:calc(100vh - 150px)}
         .zoomHint{font-size:10px;color:var(--muted);margin-top:4px}
         @media(max-width:1200px){.miTop{grid-template-columns:1fr 1fr 1fr}.miPremiumGrid{grid-template-columns:1fr 1fr}}
-        @media(max-width:800px){.miTop,.miPremiumGrid,.miFoot{grid-template-columns:1fr}.premiumBox{height:260px}}
+        @media(max-width:800px){.miTop,.miPremiumGrid,.miFoot,.miInsightGrid{grid-template-columns:1fr}.premiumBox{height:260px}}
     </style>
 </head>
 
@@ -738,6 +751,18 @@
             <span id="marketModeChip" class="liveChip">LIVE VIEW</span>
             <span id="marketSessionMessage" style="font-size:12px;color:var(--muted)"></span>
         </div>
+
+
+        <section class="miInsightGrid">
+            <div class="card">
+                <div class="chartHeader"><div><h3>OPTION PREMIUM SUMMARY</h3><p>Key Levels • current LTP and change from first recorded premium of the session</p></div></div>
+                <table class="miTable"><thead><tr><th>Strike</th><th>CE LTP</th><th>CE %</th><th>PE LTP</th><th>PE %</th></tr></thead><tbody id="miPremiumSummaryRows"><tr><td colspan="5">Waiting for premium data</td></tr></tbody></table>
+            </div>
+            <div class="card">
+                <div class="chartHeader"><div><h3>CE vs PE PREMIUM PRESSURE</h3><p>Current • relative absolute premium movement at each locked strike</p></div></div>
+                <table class="miTable"><thead><tr><th>Strike</th><th>CE</th><th>PE</th><th>Interpretation</th></tr></thead><tbody id="miPremiumPressureRows"><tr><td colspan="4">Waiting for premium data</td></tr></tbody></table>
+            </div>
+        </section>
 
         <section class="miPremiumGrid">
             <article class="premiumCard" id="card-premium-minus100-CE">
@@ -1114,6 +1139,38 @@ function updatePremiumChart(def,state){
     }
 }
 
+
+function premiumChangePct(rows){
+    if(!Array.isArray(rows)||!rows.length) return null;
+    const first=Number(rows[0]?.open ?? rows[0]?.close ?? rows[0]?.price);
+    const last=Number(rows[rows.length-1]?.close ?? rows[rows.length-1]?.price);
+    if(!Number.isFinite(first)||!Number.isFinite(last)||first===0) return null;
+    return (last-first)/first*100;
+}
+
+function updatePremiumInsightTables(state){
+    const defs=[['minus100','ATM -100',-100],['atm','ATM',0],['plus100','ATM +100',100]];
+    const summary=[], pressure=[];
+    for(const [key,label,offset] of defs){
+        const ce=premiumSeries(state,key,'CE'), pe=premiumSeries(state,key,'PE');
+        const ceLast=ce.length?Number(ce[ce.length-1]?.close ?? ce[ce.length-1]?.price):null;
+        const peLast=pe.length?Number(pe[pe.length-1]?.close ?? pe[pe.length-1]?.price):null;
+        const cePct=premiumChangePct(ce), pePct=premiumChangePct(pe);
+        const strike=state?.opening_atm ? Number(state.opening_atm)+offset : null;
+        const strikeText=strike?`${indianNumber(strike)} (${label})`:label;
+        const pctHtml=v=>Number.isFinite(v)?`<span class="${v>=0?'positive':'negative'}">${signed(v,2)}%</span>`:'—';
+        summary.push(`<tr><td><b>${strikeText}</b></td><td>${indianNumber(ceLast)}</td><td>${pctHtml(cePct)}</td><td>${indianNumber(peLast)}</td><td>${pctHtml(pePct)}</td></tr>`);
+        const ceMove=Number.isFinite(cePct)?Math.abs(cePct):0, peMove=Number.isFinite(pePct)?Math.abs(pePct):0, total=ceMove+peMove;
+        const cePressure=total?ceMove/total*100:0, pePressure=total?peMove/total*100:0;
+        let interp='BALANCED', cls='pressureBalanced';
+        if(total){if(pePressure-cePressure>=10){interp='PE DOMINANT';cls='pressurePE';}else if(cePressure-pePressure>=10){interp='CE DOMINANT';cls='pressureCE';}}
+        const bar=(v,t)=>`<div class="pressureTrack"><div class="pressureBar"><div class="pressureFill ${t}" style="width:${v.toFixed(1)}%"></div></div><b>${v.toFixed(0)}%</b></div>`;
+        pressure.push(`<tr><td><b>${strikeText}</b></td><td>${total?bar(cePressure,'ce'):'—'}</td><td>${total?bar(pePressure,'pe'):'—'}</td><td class="${cls}">${total?interp:'—'}</td></tr>`);
+    }
+    const s=document.getElementById('miPremiumSummaryRows'), p=document.getElementById('miPremiumPressureRows');
+    if(s) s.innerHTML=summary.join(''); if(p) p.innerHTML=pressure.join('');
+}
+
 function updateMarketPage(state){
     const n=state?.nifty||{}, v=state?.vix||{};
     document.getElementById("miNiftyPrice").textContent=indianNumber(n.price);
@@ -1129,6 +1186,7 @@ function updateMarketPage(state){
     for(const def of premiumDefs){const raw=premiumSeries(state,def.key,def.type);if(raw.length){active++;totalPoints+=raw.length;}updatePremiumChart(def,state);}
     document.getElementById("miRecorder").textContent=`${active} / 6`;
     document.getElementById("miRecorderMeta").textContent=active?`${totalPoints} premium minute candle records available across contracts`:`Waiting for option ticks`;
+    updatePremiumInsightTables(state);
 }
 
 function setPremiumInterval(id,minutes,btn){
@@ -1543,6 +1601,7 @@ function downloadCIO(){
 }
 
 function showPage(name){
+    if(name === "market") ensurePremiumInsightPanels();
     for(const id of ["oic","nifty","market","reports"]){
         document.getElementById(`page${id.charAt(0).toUpperCase()+id.slice(1)}`).classList.toggle("active", id===name);
         document.getElementById(`tab${id.charAt(0).toUpperCase()+id.slice(1)}`).classList.toggle("active", id===name);
@@ -1647,8 +1706,36 @@ function restoreTheme(){
     }
 }
 
+
+function ensurePremiumInsightPanels(){
+    const page = document.getElementById("pageMarket");
+    if(!page) return;
+    const grid = page.querySelector(".miPremiumGrid");
+    if(!grid) return;
+
+    let insights = page.querySelector(".miInsightGrid");
+    if(!insights){
+        insights = document.createElement("section");
+        insights.className = "miInsightGrid";
+        insights.innerHTML = `
+            <div class="card">
+                <div class="chartHeader"><div><h3>OPTION PREMIUM SUMMARY</h3><p>Key Levels • current LTP and change from first recorded premium of the session</p></div></div>
+                <table class="miTable"><thead><tr><th>Strike</th><th>CE LTP</th><th>CE %</th><th>PE LTP</th><th>PE %</th></tr></thead><tbody id="miPremiumSummaryRows"><tr><td colspan="5">Waiting for premium data</td></tr></tbody></table>
+            </div>
+            <div class="card">
+                <div class="chartHeader"><div><h3>CE vs PE PREMIUM PRESSURE</h3><p>Current • relative absolute premium movement at each locked strike</p></div></div>
+                <table class="miTable"><thead><tr><th>Strike</th><th>CE</th><th>PE</th><th>Interpretation</th></tr></thead><tbody id="miPremiumPressureRows"><tr><td colspan="4">Waiting for premium data</td></tr></tbody></table>
+            </div>`;
+        grid.parentNode.insertBefore(insights, grid);
+    }
+    insights.style.display = "grid";
+    insights.style.visibility = "visible";
+    insights.style.opacity = "1";
+}
+
 async function boot(){
     restoreTheme();
+    ensurePremiumInsightPanels();
     initCharts();
 
     await loadLive();
