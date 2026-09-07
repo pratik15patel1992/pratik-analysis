@@ -63,7 +63,7 @@ def disable_live_api_cache(response):
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
             response.headers["Surrogate-Control"] = "no-store"
-            response.headers["X-Pratik-Live"] = "CLEAN-V2"
+            response.headers["X-Pratik-Live"] = "CLEAN-V1"
     except Exception:
         pass
     return response
@@ -1520,6 +1520,34 @@ def _row_minutes(time_text):
         return None
 
 
+STRATEGY_LAST_EXIT_MINUTE = 14 * 60 + 45
+
+
+def _strategy_market_clock():
+    """Return the latest recorded NIFTY market minute/timestamp, never wall-clock time."""
+    rows = state.get("series", {}).get("nifty", []) or []
+    row = rows[-1] if rows else {}
+    t = row.get("time")
+    ts = row.get("timestamp")
+    m = _row_minutes(t)
+    if m is None:
+        return None, None, None
+    return str(t)[:5], ts, m
+
+
+def _strategy_price_at_or_before(target_minutes):
+    """Use only a recorded NIFTY point at/before the requested market minute."""
+    found = _point_at_or_before(state.get("series", {}).get("nifty", []), target_minutes)
+    if not found:
+        return None
+    _, row = found
+    price = row.get("close", row.get("price"))
+    try:
+        return float(price)
+    except Exception:
+        return None
+
+
 def _point_at_or_before(series, target_minutes):
     best = None
     for row in series or []:
@@ -1616,9 +1644,11 @@ def _update_persistence(strategy_name, direction, condition):
     return _recent_direction_count(strategy_name, direction)
 
 
-def _signal_record(strategy_name, action, option_type, price, reason, metrics):
+def _signal_record(strategy_name, action, option_type, price, reason, metrics, market_time=None, market_timestamp=None):
+    market_time = market_time or metrics.get("market_time")
+    market_timestamp = market_timestamp or metrics.get("market_timestamp")
     return {
-        "time": minute_label(), "timestamp": now_ist().isoformat(), "strategy": strategy_name,
+        "time": market_time, "timestamp": market_timestamp, "strategy": strategy_name,
         "action": action, "type": option_type, "nifty_level": round(float(price), 2),
         "reason": reason, "master_d": metrics.get("master_d"),
         "pe_votes": metrics.get("pe_votes"), "ce_votes": metrics.get("ce_votes"),
@@ -1634,7 +1664,7 @@ def _enter_strategy(strategy_name, option_type, price, reason, metrics):
     sl = p - STRATEGY_HARD_SL_POINTS if option_type == "PE" else p + STRATEGY_HARD_SL_POINTS
     trade = {
         "date": today_key(), "type": option_type, "side": f"SELL {option_type}",
-        "entry_time": minute_label(), "entry_timestamp": now_ist().isoformat(),
+        "entry_time": metrics.get("market_time"), "entry_timestamp": metrics.get("market_timestamp"),
         "entry_level": round(p, 2), "sl_level": round(sl, 2), "exit_time": None,
         "exit_level": None, "points": None, "mae": 0.0, "mfe": 0.0,
         "sl_hit": False, "result": "OPEN", "exit_reason": None,
@@ -1662,7 +1692,7 @@ def _exit_strategy(strategy_name, price, reason, metrics, sl_hit=False):
     p, e = float(price), float(trade["entry_level"])
     points = p - e if trade.get("type") == "PE" else e - p
     trade.update({
-        "exit_time": minute_label(), "exit_timestamp": now_ist().isoformat(),
+        "exit_time": metrics.get("market_time"), "exit_timestamp": metrics.get("market_timestamp"),
         "exit_level": round(p, 2), "points": round(points, 2), "sl_hit": bool(sl_hit),
         "result": "WIN" if points > 0 else ("LOSS" if points < 0 else "FLAT"),
         "exit_reason": reason,
@@ -1674,67 +1704,23 @@ def _exit_strategy(strategy_name, price, reason, metrics, sl_hit=False):
     _set_direction_count(strategy_name, "CE", 0)
 
 
-def _enforce_mandatory_time_exit():
-    """CLEAN V2.1 fail-safe: force-close every active strategy at/after 14:45 IST.
-
-    This is intentionally independent of the once-per-minute strategy guard,
-    OIC/CIO availability, MasterD, and whether the latest REST refresh succeeds.
-    The browser polls /api/state, so any still-open S1/S2/PNA trade is closed on
-    the next request at/after 14:45 using the latest available NIFTY level.
-    """
-    now_m = _row_minutes(minute_label())
-    if now_m is None or now_m < 14 * 60 + 45:
-        return False
-
-    price = state.get("nifty", {}).get("price")
-    if price is None:
-        return False
-
-    engine = state.setdefault("strategy_engine", {})
-    metrics = engine.get("metrics") or {}
-    if baseline_ready:
-        try:
-            metrics = _strategy_metrics()
-            engine["metrics"] = metrics
-        except Exception:
-            # Time exit must never depend on OIC/CIO metric calculation.
-            metrics = metrics or {}
-
-    closed_any = False
-    p = float(price)
-    for name in ("S1", "S2", "PNA"):
-        trade = state.get("strategies", {}).get(name, {}).get("active")
-        if not trade:
-            continue
-        _update_excursions(trade, p)
-        _exit_strategy(name, p, "14:45 TIME EXIT", metrics, False)
-        closed_any = True
-
-    if closed_any:
-        state["last_update"] = now_ist().isoformat()
-
-    return closed_any
-
-
 def evaluate_live_strategies():
     """Evaluate once per completed/snapshotted minute from the recorded OIC+CIO series."""
-    # CLEAN V2.1: mandatory 14:45 exit runs BEFORE all normal guards so it
-    # cannot be skipped by last_eval_minute, baseline readiness, or OIC/CIO.
-    if _enforce_mandatory_time_exit():
-        return
-
     price = state.get("nifty", {}).get("price")
     if price is None or not baseline_ready:
         return
-    now_m = _row_minutes(minute_label())
+    market_time, market_timestamp, now_m = _strategy_market_clock()
     if now_m is None:
         return
     engine = state.setdefault("strategy_engine", {})
-    if engine.get("last_eval_minute") == minute_label():
+    if engine.get("last_eval_minute") == market_time:
         return
-    engine["last_eval_minute"] = minute_label()
+    engine["last_eval_minute"] = market_time
 
     metrics = _strategy_metrics()
+    metrics["market_time"] = market_time
+    metrics["market_timestamp"] = market_timestamp
+    metrics["time"] = market_time
     engine["metrics"] = metrics
     p = float(price)
 
@@ -1747,8 +1733,13 @@ def evaluate_live_strategies():
         if (trade["type"] == "PE" and p <= float(trade["sl_level"])) or (trade["type"] == "CE" and p >= float(trade["sl_level"])):
             _exit_strategy(name, p, "30-POINT HARD SL", metrics, True)
             continue
-        if now_m >= 14 * 60 + 45:
-            _exit_strategy(name, p, "14:45 TIME EXIT", metrics, False)
+        if now_m >= STRATEGY_LAST_EXIT_MINUTE:
+            cutoff_price = _strategy_price_at_or_before(STRATEGY_LAST_EXIT_MINUTE)
+            if cutoff_price is not None:
+                cutoff_metrics = dict(metrics)
+                cutoff_metrics["market_time"] = "14:45"
+                cutoff_metrics["market_timestamp"] = None
+                _exit_strategy(name, cutoff_price, "14:45 TIME EXIT", cutoff_metrics, False)
             continue
 
         opposite = "CE" if trade["type"] == "PE" else "PE"
@@ -1768,7 +1759,7 @@ def evaluate_live_strategies():
                 _exit_strategy(name, p, "MASTER OIC/CIO REVERSAL", metrics, False)
 
     # Observation window: collect data but no new entries until after 09:30.
-    if now_m < 9 * 60 + 30 or now_m >= 14 * 60 + 45:
+    if now_m < 9 * 60 + 30 or now_m >= STRATEGY_LAST_EXIT_MINUTE:
         return
 
     for direction in ("PE", "CE"):
@@ -2236,12 +2227,13 @@ def start_live(access_token):
         ticker = None
 
         ensure_snapshot_worker()
+        ensure_rest_backup_worker()
 
         with lock:
-            state["message"] = "CLEAN V2 ready — waiting for dashboard refresh..."
+            state["message"] = "Starting CLEAN V1 REST live feed..."
             state["connected"] = False
 
-        print("[KITE] CLEAN V2 session initialized; request-driven REST ready.", flush=True)
+        print("[KITE] CLEAN V1 REST primary feed initialized.", flush=True)
     finally:
         if acquired:
             try:
@@ -2327,11 +2319,11 @@ def rest_backup_worker():
 
 
 def ensure_rest_backup_worker():
-    # CLEAN V2: no background REST worker.
-    # /api/state owns live refresh so the same Gunicorn process that serves
-    # the browser also fetches and snapshots the market data.
-    return
-
+    global rest_backup_started
+    if rest_backup_started:
+        return
+    rest_backup_started = True
+    threading.Thread(target=rest_backup_worker, daemon=True, name="kite-rest-backup").start()
 
 def reconnect_watchdog():
     """Stage 7H: observe WebSocket health; do not kill the worker.
@@ -2452,9 +2444,38 @@ def restore_today_history():
         if isinstance(saved_engine, dict):
             state["strategy_engine"].update(saved_engine)
 
+def repair_strategy_exit_cutoff():
+    """Repair legacy rows whose exit was stamped after the locked 14:45 market cutoff."""
+    cutoff_price = _strategy_price_at_or_before(STRATEGY_LAST_EXIT_MINUTE)
+    if cutoff_price is None:
+        return
+    for strategy_name in ("S1", "S2", "PNA"):
+        s = state.get("strategies", {}).get(strategy_name, {})
+        for trade in s.get("trades", []) or []:
+            exit_m = _row_minutes(trade.get("exit_time"))
+            if exit_m is None or exit_m <= STRATEGY_LAST_EXIT_MINUTE:
+                continue
+            entry = trade.get("entry_level")
+            try:
+                entry = float(entry)
+            except Exception:
+                continue
+            points = cutoff_price - entry if trade.get("type") == "PE" else entry - cutoff_price
+            trade["exit_time"] = "14:45"
+            trade["exit_timestamp"] = None
+            trade["exit_level"] = round(cutoff_price, 2)
+            trade["points"] = round(points, 2)
+            trade["result"] = "WIN" if points > 0 else ("LOSS" if points < 0 else "FLAT")
+            trade["exit_reason"] = "14:45 TIME EXIT"
+        active = s.get("active")
+        if active:
+            # Active positions are handled by the live evaluator from market data only.
+            pass
+
 
 init_db()
 restore_today_history()
+repair_strategy_exit_cutoff()
 refresh_history_dates()
 # Important for free Render: when GitHub Actions wakes/restarts the service,
 # reconnect to Kite from today's Neon-persisted token without requiring the
@@ -2672,81 +2693,14 @@ def kite_logout():
 
 
 
-rest_request_refresh_lock = threading.Lock()
-last_request_rest_refresh_ts = 0.0
-
 def request_rest_refresh_if_due():
-    """CLEAN V2 authoritative live refresh.
-
-    The dashboard polls /api/state every 2 seconds. This function performs at
-    most one Zerodha Quote request per ~2 seconds, applies the quotes, and
-    immediately snapshots OIC/CIO/NIFTY in the SAME request-serving process.
-    No WebSocket and no background market-data thread are involved.
-    """
-    global last_request_rest_refresh_ts, rest_quote_errors, rest_fallback_active
-
-    if not is_market_session():
-        return False
-    if kite is None or not token_meta:
-        return False
-
-    now_ts = time.time()
-    if now_ts - last_request_rest_refresh_ts < 1.90:
-        return False
-
-    if not rest_request_refresh_lock.acquire(blocking=False):
-        return False
-
-    try:
-        now_ts = time.time()
-        if now_ts - last_request_rest_refresh_ts < 1.90:
-            return False
-
-        quotes = kite.quote(_rest_quote_symbols())
-        count = _apply_rest_quotes(quotes)
-        last_request_rest_refresh_ts = time.time()
-        rest_quote_errors = 0
-        rest_fallback_active = True
-
-        # Snapshot immediately so the response being returned to the browser
-        # already contains the newest NIFTY / OIC / CIO minute values.
-        make_snapshot()
-
-        with lock:
-            state["connected"] = True
-            state["message"] = "LIVE — CLEAN V2 REST"
-
-        print(
-            f"[KITE] CLEAN V2 request refresh OK; OI contracts={count}",
-            flush=True,
-        )
-        return True
-
-    except Exception as e:
-        rest_quote_errors += 1
-        with lock:
-            state["connected"] = False
-            state["message"] = f"CLEAN V2 REST warning ({type(e).__name__})"
-        print(
-            f"[KITE] CLEAN V2 request refresh ERROR: {type(e).__name__}: {e}",
-            flush=True,
-        )
-        return False
-
-    finally:
-        rest_request_refresh_lock.release()
+    # CLEAN V1: background REST worker is the only market-data poller.
+    return False
 
 
 @app.route("/api/state")
 def api_state():
-    request_rest_refresh_if_due()
-
-    # CLEAN V2.1 hard fail-safe: this check is request-driven and independent
-    # of the strategy engine's once-per-minute guard. Even if the 14:45 engine
-    # evaluation was missed or a REST refresh failed, the next dashboard poll
-    # force-closes every still-open strategy at/after 14:45.
     with lock:
-        _enforce_mandatory_time_exit()
         return jsonify(state)
 
 
@@ -3705,7 +3659,6 @@ def download_raw_premium_excel(day):
 
 @app.route("/health")
 def health():
-    request_rest_refresh_if_due()
     return jsonify(
         {
             "ok": True,
@@ -3717,7 +3670,7 @@ def health():
             "socket_flag": bool(state.get("connected")),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "CLEAN-V2-REQUEST-DRIVEN-REST",
+            "feed_architecture": "CLEAN-V2-EXIT-LOCK",
             "snapshot_source": "fresh-tick-or-rest",
             "feed_start_owner": "startup-or-kite-callback-only",
             "last_snapshot_age_sec": round(time.time() - last_snapshot_ts, 1) if last_snapshot_ts else None,
@@ -3726,7 +3679,7 @@ def health():
             "rest_fallback_active": rest_fallback_active,
             "last_rest_quote_ist": last_rest_quote_ist,
             "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "CLEAN-V2-SAME-PROCESS-REFRESH",
+            "reconnect_fix": "CLEAN-V2-MARKET-TIME-ONLY",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
             "stale_restart_in_progress": stale_restart_in_progress,
