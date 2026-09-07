@@ -50,6 +50,24 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(days=7),
 )
 
+# Stage 7L:
+# Live JSON endpoints must never be served from browser/proxy cache.
+# The WebSocket callback can be receiving current OI while a cached /api/state
+# or /health response makes the portal look frozen at the process-start snapshot.
+@app.after_request
+def disable_live_api_cache(response):
+    try:
+        path = request.path or ""
+        if path == "/health" or path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+            response.headers["Surrogate-Control"] = "no-store"
+            response.headers["X-Pratik-Live"] = "7L"
+    except Exception:
+        pass
+    return response
+
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
 DATA.mkdir(exist_ok=True)
@@ -3510,11 +3528,15 @@ def health():
     return jsonify(
         {
             "ok": True,
+            "process_pid": os.getpid(),
+            "process_started_ist": (datetime.utcfromtimestamp(PROCESS_START_TS) + IST_OFFSET).isoformat(),
+            "tick_counter": tick_counter,
+            "oi_tick_counter": oi_tick_counter,
             "connected": live_data_available(),
             "socket_flag": bool(state.get("connected")),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "7K-single-owner-feed-lifecycle",
+            "feed_architecture": "7L-no-cache-live-api",
             "snapshot_source": "fresh-tick-or-rest",
             "feed_start_owner": "startup-or-kite-callback-only",
             "last_snapshot_age_sec": round(time.time() - last_snapshot_ts, 1) if last_snapshot_ts else None,
@@ -3523,7 +3545,7 @@ def health():
             "rest_fallback_active": rest_fallback_active,
             "last_rest_quote_ist": last_rest_quote_ist,
             "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "7K-no-dashboard-feed-restart",
+            "reconnect_fix": "7L-live-api-no-store",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
             "stale_restart_in_progress": stale_restart_in_progress,
