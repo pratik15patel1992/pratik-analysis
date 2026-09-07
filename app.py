@@ -1674,8 +1674,55 @@ def _exit_strategy(strategy_name, price, reason, metrics, sl_hit=False):
     _set_direction_count(strategy_name, "CE", 0)
 
 
+def _enforce_mandatory_time_exit():
+    """CLEAN V2.1 fail-safe: force-close every active strategy at/after 14:45 IST.
+
+    This is intentionally independent of the once-per-minute strategy guard,
+    OIC/CIO availability, MasterD, and whether the latest REST refresh succeeds.
+    The browser polls /api/state, so any still-open S1/S2/PNA trade is closed on
+    the next request at/after 14:45 using the latest available NIFTY level.
+    """
+    now_m = _row_minutes(minute_label())
+    if now_m is None or now_m < 14 * 60 + 45:
+        return False
+
+    price = state.get("nifty", {}).get("price")
+    if price is None:
+        return False
+
+    engine = state.setdefault("strategy_engine", {})
+    metrics = engine.get("metrics") or {}
+    if baseline_ready:
+        try:
+            metrics = _strategy_metrics()
+            engine["metrics"] = metrics
+        except Exception:
+            # Time exit must never depend on OIC/CIO metric calculation.
+            metrics = metrics or {}
+
+    closed_any = False
+    p = float(price)
+    for name in ("S1", "S2", "PNA"):
+        trade = state.get("strategies", {}).get(name, {}).get("active")
+        if not trade:
+            continue
+        _update_excursions(trade, p)
+        _exit_strategy(name, p, "14:45 TIME EXIT", metrics, False)
+        closed_any = True
+
+    if closed_any:
+        state["last_update"] = now_ist().isoformat()
+
+    return closed_any
+
+
 def evaluate_live_strategies():
     """Evaluate once per completed/snapshotted minute from the recorded OIC+CIO series."""
+    # CLEAN V2.1: mandatory 14:45 exit runs BEFORE all normal guards so it
+    # cannot be skipped by last_eval_minute, baseline readiness, or OIC/CIO.
+    if _enforce_mandatory_time_exit():
+        return
+
     price = state.get("nifty", {}).get("price")
     if price is None or not baseline_ready:
         return
@@ -2693,7 +2740,13 @@ def request_rest_refresh_if_due():
 @app.route("/api/state")
 def api_state():
     request_rest_refresh_if_due()
+
+    # CLEAN V2.1 hard fail-safe: this check is request-driven and independent
+    # of the strategy engine's once-per-minute guard. Even if the 14:45 engine
+    # evaluation was missed or a REST refresh failed, the next dashboard poll
+    # force-closes every still-open strategy at/after 14:45.
     with lock:
+        _enforce_mandatory_time_exit()
         return jsonify(state)
 
 
