@@ -2403,7 +2403,7 @@ def portal_authenticated():
 @app.before_request
 def require_portal_login():
     # Login page, static assets and health check stay public.
-    if request.endpoint in {"portal_login", "static", "health"}:
+    if request.endpoint in {"portal_login", "static", "health", "kite_callback"}:
         return None
 
     if not portal_authenticated():
@@ -2511,42 +2511,60 @@ def kite_login():
 
 @app.route("/kite/callback")
 def kite_callback():
-    request_token = request.args.get(
-        "request_token"
-    )
+    request_token = request.args.get("request_token")
 
     if not request_token:
-        return (
-            "Zerodha did not return a request_token",
-            400,
+        return ("Zerodha did not return a request_token", 400)
+
+    try:
+        print("[KITE] Zerodha callback received.", flush=True)
+
+        k = KiteConnect(api_key=KITE_API_KEY)
+        kite_session = k.generate_session(
+            request_token,
+            api_secret=KITE_API_SECRET,
         )
 
-    k = KiteConnect(
-        api_key=KITE_API_KEY
-    )
+        access_token = kite_session["access_token"]
 
-    session = k.generate_session(
-        request_token,
-        api_secret=KITE_API_SECRET,
-    )
+        # Persist first so a Render restart can restore the same valid
+        # same-day session without asking the user to log in again.
+        save_access_token(access_token)
 
-    access_token = session[
-        "access_token"
-    ]
+        with lock:
+            state["message"] = "Zerodha login accepted — starting live feed..."
+            state["connected"] = False
 
-    save_access_token(
-        access_token
-    )
+        print("[KITE] Access token saved; calling start_live() synchronously.", flush=True)
 
-    print("[KITE] Fresh Zerodha callback accepted; launching live feed.", flush=True)
-    threading.Thread(
-        target=start_live,
-        args=(access_token,),
-        daemon=True,
-        name="kite-callback-live-start",
-    ).start()
+        # Stage 7N: start synchronously inside the callback.
+        # This removes ambiguity from a daemon thread that may never run,
+        # may lose ownership, or may fail after the HTTP redirect has
+        # already returned to the dashboard.
+        start_live(access_token)
 
-    return redirect("/")
+        print("[KITE] start_live() returned; waiting for WebSocket on_connect.", flush=True)
+
+        return redirect("/")
+
+    except Exception as e:
+        import traceback
+        print(
+            f"[KITE] CALLBACK FEED START ERROR: {type(e).__name__}: {e}",
+            flush=True,
+        )
+        traceback.print_exc()
+
+        # Keep today's saved token. A feed startup failure is not proof that
+        # the token is invalid.
+        with lock:
+            state["connected"] = False
+            state["message"] = (
+                f"Zerodha login OK — feed startup failed "
+                f"({type(e).__name__})"
+            )
+
+        return redirect("/")
 
 
 @app.route("/kite/logout")
@@ -3558,7 +3576,7 @@ def health():
             "rest_fallback_active": rest_fallback_active,
             "last_rest_quote_ist": last_rest_quote_ist,
             "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "7L-live-api-no-store",
+            "reconnect_fix": "7N-synchronous-kite-callback",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
             "stale_restart_in_progress": stale_restart_in_progress,
