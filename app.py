@@ -211,7 +211,13 @@ rest_backup_started = False
 rest_fallback_active = False
 last_rest_quote_ts = 0.0
 last_rest_quote_ist = None
+# A REST response is considered genuinely LIVE for OIC/CIO only when the
+# complete nearest-expiry option universe + NIFTY are present in that cycle.
+last_complete_rest_quote_ts = 0.0
+last_complete_rest_quote_ist = None
+last_rest_option_count = 0
 rest_quote_errors = 0
+market_close_finalized_day = None
 live_start_mutex = threading.Lock()
 snapshot_thread_started = False
 persistence_thread_started = False
@@ -253,6 +259,10 @@ def minute_label():
 
 def is_market_session():
     n = now_ist()
+
+    # NSE regular equity/derivatives session is Monday-Friday.
+    if n.weekday() >= 5:
+        return False
 
     current = n.hour * 60 + n.minute
     start = MARKET_START_HOUR * 60 + MARKET_START_MINUTE
@@ -1031,6 +1041,17 @@ def ensure_locked_strike_mappings(k=None):
     if len(oic_tokens) == 3 and len(premium_token_map) == 6:
         return True
 
+    # Before 09:15, Kite's quote OHLC "open" may still refer to the previous
+    # trading session. Never use it to lock today's ATM. Instrument discovery
+    # and CIO baseline building may run pre-market; strike locking waits for
+    # the actual session open.
+    n = now_ist()
+    current_m = n.hour * 60 + n.minute
+    market_start_m = MARKET_START_HOUR * 60 + MARKET_START_MINUTE
+    if current_m < market_start_m:
+        print("[DIAG] Pre-market: waiting for 09:15 before locking opening ATM", flush=True)
+        return False
+
     with lock:
         atm = state.get("opening_atm")
         state_nifty = dict(state.get("nifty") or {})
@@ -1162,45 +1183,56 @@ def build_oi_baseline():
         ):
             prev_oi = {
                 int(k): int(v)
-                for k, v in cached[
-                    "oi"
-                ].items()
+                for k, v in cached["oi"].items()
             }
 
-            baseline_ready = True
+            expected_count = len(option_instruments)
+            baseline_ready = expected_count > 0 and len(prev_oi) == expected_count
 
             print(
-                f"[DIAG] CIO baseline loaded. Contracts={len(prev_oi)}",
+                f"[DIAG] CIO baseline cache loaded. "
+                f"Contracts={len(prev_oi)}/{expected_count} ready={baseline_ready}",
                 flush=True,
             )
 
-            return
+            if baseline_ready:
+                return
+            # Partial cache is not sufficient; continue below and rebuild.
 
         result = {}
+        expected_tokens = [
+            int(row["instrument_token"])
+            for row in option_instruments
+        ]
 
-        for index, row in enumerate(
-            option_instruments,
-            start=1,
-        ):
-            token = int(
-                row["instrument_token"]
-            )
-
-            value = previous_oi_for_token(
-                kite,
-                token,
-            )
-
+        # First pass across the full nearest-expiry universe.
+        for index, token in enumerate(expected_tokens, start=1):
+            value = previous_oi_for_token(kite, token)
             if value is not None:
                 result[token] = value
 
             if index % 20 == 0:
                 print(
-                    f"[DIAG] Baseline {index}/{len(option_instruments)}",
+                    f"[DIAG] Baseline {index}/{len(expected_tokens)}",
                     flush=True,
                 )
-
             time.sleep(0.35)
+
+        # Retry any missing contracts twice. CIO is not declared ready until
+        # every contract used by the CIO total has a previous-day OI baseline.
+        for retry_no in (1, 2):
+            missing = [t for t in expected_tokens if t not in result]
+            if not missing:
+                break
+            print(
+                f"[DIAG] CIO baseline retry {retry_no}; missing={len(missing)}",
+                flush=True,
+            )
+            for token in missing:
+                value = previous_oi_for_token(kite, token)
+                if value is not None:
+                    result[token] = value
+                time.sleep(0.45)
 
         prev_oi = result
 
@@ -1208,22 +1240,24 @@ def build_oi_baseline():
             BASELINE_FILE,
             {
                 "date": today_key(),
-                "expiry": state.get(
-                    "expiry"
-                ),
-                "oi": {
-                    str(k): v
-                    for k, v in result.items()
-                },
+                "expiry": state.get("expiry"),
+                "oi": {str(k): v for k, v in result.items()},
             },
         )
 
-        baseline_ready = True
+        baseline_ready = len(prev_oi) == len(expected_tokens)
 
-        print(
-            f"[DIAG] CIO baseline ready. Contracts={len(prev_oi)}",
-            flush=True,
-        )
+        if baseline_ready:
+            print(
+                f"[DIAG] CIO baseline ready. Contracts={len(prev_oi)}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[DIAG] CIO baseline INCOMPLETE. "
+                f"Have={len(prev_oi)} Expected={len(expected_tokens)}",
+                flush=True,
+            )
 
     except Exception as e:
         baseline_ready = False
@@ -1792,7 +1826,11 @@ def live_data_available(max_ws_age=20.0, max_rest_age=20.0):
     """
     now_ts = time.time()
     ws_fresh = bool(last_live_tick_ts and (now_ts - last_live_tick_ts) <= max_ws_age)
-    rest_fresh = bool(last_rest_quote_ts and (now_ts - last_rest_quote_ts) <= max_rest_age)
+    # REST is "fresh" for OIC/CIO/strategies only after a COMPLETE quote cycle.
+    rest_fresh = bool(
+        last_complete_rest_quote_ts
+        and (now_ts - last_complete_rest_quote_ts) <= max_rest_age
+    )
     return ws_fresh or rest_fresh
 
 
@@ -1858,9 +1896,16 @@ def make_snapshot():
     current_m = n.hour * 60 + n.minute
 
     with lock:
-        # NIFTY remains based on genuine received prices only.
+        nifty_series = state["series"]["nifty"]
         if fresh:
+            _carry_forward_to(nifty_series, current_m, include_target=False)
             snapshot_current_nifty_candle()
+            if nifty_series and nifty_series[-1].get("time") == minute_label():
+                nifty_series[-1]["carried_forward"] = False
+        else:
+            # Continuity only. This row is explicitly tagged and is never used
+            # to create a strategy signal.
+            _carry_forward_to(nifty_series, current_m, include_target=True)
 
         for key in ("atm", "minus100", "plus100"):
             series = state["series"][key]
@@ -1942,6 +1987,40 @@ def backfill_oic_cio_to_market_close():
     return added
 
 
+def finalize_market_day_once():
+    """Persist the completed trading day once after 15:30 IST."""
+    global market_close_finalized_day
+
+    n = now_ist()
+    market_end = MARKET_END_HOUR * 60 + MARKET_END_MINUTE
+    now_m = n.hour * 60 + n.minute
+    day = today_key()
+
+    if n.weekday() >= 5 or now_m <= market_end:
+        return False
+    if market_close_finalized_day == day:
+        return False
+
+    # First complete continuity labels for any final missing minute, then save
+    # regardless of whether a row was added.
+    backfill_oic_cio_to_market_close()
+
+    # NIFTY continuity through 15:30 is also explicit/quality-labelled.
+    with lock:
+        nifty_series = state.get("series", {}).get("nifty", [])
+        if nifty_series:
+            _carry_forward_to(
+                nifty_series,
+                market_end,
+                include_target=True,
+            )
+
+    save_current_history()
+    market_close_finalized_day = day
+    print("[DB] Final market-day snapshot persisted through 15:30.", flush=True)
+    return True
+
+
 def snapshot_worker():
     """
     Stage 7J:
@@ -1960,9 +2039,9 @@ def snapshot_worker():
             if is_market_session():
                 make_snapshot()
             else:
-                # If this deployment starts after market close, complete any
-                # missing OIC/CIO minutes through 15:30 from the last valid row.
-                backfill_oic_cio_to_market_close()
+                # After market close, complete quality-labelled continuity and
+                # persist the final daily snapshot exactly once.
+                finalize_market_day_once()
         except Exception as e:
             print(f"[DIAG] Snapshot ERROR: {e}", flush=True)
 
@@ -2366,12 +2445,20 @@ def _rest_quote_symbols():
     return symbols
 
 def _apply_rest_quotes(quotes):
-    """Apply REST Quote payload without pretending it was a WebSocket tick."""
-    global latest_nifty, latest_vix, last_rest_quote_ts, last_rest_quote_ist
+    """Apply one REST quote cycle and return (option_count, complete_cycle)."""
+    global latest_nifty, latest_vix
+    global last_rest_quote_ts, last_rest_quote_ist
+    global last_complete_rest_quote_ts, last_complete_rest_quote_ist
+    global last_rest_option_count
+
     option_updates = 0
+    option_seen = set()
+    nifty_seen = False
+
     for key, q in (quotes or {}).items():
         token = int(q.get("instrument_token") or 0)
         if token == nifty_token or key == "NSE:NIFTY 50":
+            nifty_seen = True
             price = q.get("last_price")
             ohlc = q.get("ohlc") or {}
             if price is not None:
@@ -2396,14 +2483,33 @@ def _apply_rest_quotes(quotes):
             if oi is not None:
                 latest_oi[token] = int(oi)
                 option_updates += 1
+                option_seen.add(token)
             if token in premium_token_map and q.get("last_price") is not None:
                 update_premium_lightweight(token, q.get("last_price"), oi)
     last_rest_quote_ts = time.time()
     last_rest_quote_ist = now_ist().isoformat()
+    last_rest_option_count = len(option_seen)
+
+    expected_option_count = len(token_meta)
+    complete_cycle = (
+        nifty_seen
+        and expected_option_count > 0
+        and len(option_seen) == expected_option_count
+    )
+
+    if complete_cycle:
+        last_complete_rest_quote_ts = last_rest_quote_ts
+        last_complete_rest_quote_ist = last_rest_quote_ist
+
     with lock:
         state["last_update"] = last_rest_quote_ist
-        state["message"] = "LIVE — Zerodha REST backup"
-    return option_updates
+        state["message"] = (
+            "LIVE — Zerodha REST primary"
+            if complete_cycle
+            else f"REST partial — OI {len(option_seen)}/{expected_option_count}"
+        )
+
+    return len(option_seen), complete_cycle
 
 def rest_backup_worker():
     """Stage 7O primary live feed using Zerodha Quote REST API."""
@@ -2415,14 +2521,23 @@ def rest_backup_worker():
             if is_market_session() and kite is not None and token_meta:
                 rest_fallback_active = True
                 quotes = kite.quote(_rest_quote_symbols())
-                count = _apply_rest_quotes(quotes)
+                count, complete = _apply_rest_quotes(quotes)
                 rest_quote_errors = 0
 
-                with lock:
-                    state["connected"] = True
-                    state["message"] = "LIVE — Zerodha REST primary"
+                # The first cycle after 09:15 supplies today's genuine NIFTY
+                # session open. Lock ATM from that value, never from pre-market
+                # previous-day OHLC.
+                if len(oic_tokens) != 3:
+                    ensure_locked_strike_mappings(None)
 
-                print(f"[KITE] CLEAN V1 REST live; OI contracts={count}", flush=True)
+                with lock:
+                    state["connected"] = bool(complete)
+
+                print(
+                    f"[KITE] CLEAN V2.6 REST cycle; "
+                    f"OI={count}/{len(token_meta)} complete={complete}",
+                    flush=True,
+                )
             else:
                 rest_fallback_active = False
 
@@ -2634,7 +2749,7 @@ def repair_strategy_exit_cutoff():
 init_db()
 restore_today_history()
 repair_strategy_exit_cutoff()
-backfill_oic_cio_to_market_close()
+finalize_market_day_once()
 refresh_history_dates()
 # Important for free Render: when GitHub Actions wakes/restarts the service,
 # reconnect to Kite from today's Neon-persisted token without requiring the
@@ -3049,6 +3164,7 @@ def download_cio_excel(day):
         "NIFTY High",
         "NIFTY Low",
         "NIFTY Close",
+        "NIFTY Source",
         "ATM -100 CE OI",
         "ATM -100 PE OI",
         "ATM -100 Source",
@@ -3088,7 +3204,8 @@ def download_cio_excel(day):
         p_source = source_label(p)
         c_source = source_label(c)
 
-        quality_sources = (m_source, a_source, p_source, c_source)
+        n_source = source_label(n)
+        quality_sources = (n_source, m_source, a_source, p_source, c_source)
         if "MISSING" in quality_sources:
             row_quality = "INCOMPLETE"
         elif "CARRIED FORWARD" in quality_sources:
@@ -3102,6 +3219,7 @@ def download_cio_excel(day):
             n.get("high", fallback_price),
             n.get("low", fallback_price),
             n.get("close", fallback_price),
+            n_source,
             m.get("ce"), m.get("pe"), m_source,
             a.get("ce"), a.get("pe"), a_source,
             p.get("ce"), p.get("pe"), p_source,
@@ -3113,7 +3231,7 @@ def download_cio_excel(day):
 
     ws.freeze_panes = "A9"
     widths = [
-        14, 16, 16, 16, 16,
+        14, 16, 16, 16, 16, 20,
         20, 20, 20,
         20, 20, 20,
         20, 20, 20,
@@ -3865,7 +3983,7 @@ def health():
             "socket_flag": bool(state.get("connected")),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "CLEAN-V2.5-DATA-QUALITY-LABELS",
+            "feed_architecture": "CLEAN-V2.6-AUDITED-1MIN",
             "snapshot_source": "fresh-tick-or-rest",
             "feed_start_owner": "startup-or-kite-callback-only",
             "last_snapshot_age_sec": round(time.time() - last_snapshot_ts, 1) if last_snapshot_ts else None,
@@ -3873,8 +3991,12 @@ def health():
             "snapshot_source": "fresh-tick-or-rest",
             "rest_fallback_active": rest_fallback_active,
             "last_rest_quote_ist": last_rest_quote_ist,
+            "last_complete_rest_quote_ist": last_complete_rest_quote_ist,
+            "last_rest_option_count": last_rest_option_count,
+            "expected_option_count": len(token_meta),
+            "market_close_finalized_day": market_close_finalized_day,
             "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "CLEAN-V2.5-QUALITY-AWARE-EXPORT",
+            "reconnect_fix": "CLEAN-V2.6-FULL-CYCLE-QUALITY",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
             "stale_restart_in_progress": stale_restart_in_progress,
