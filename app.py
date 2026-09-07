@@ -1409,7 +1409,12 @@ def update_premium_lightweight(token, price, oi=None):
         rows.append(point)
 
     with lock:
-        state["premium"][key] = state["premium"].get(key) or {}
+        # Historical payloads from older premium-chart versions may contain
+        # a scalar/int in this slot. Normalize it before assigning CE/PE data.
+        if not isinstance(state.get("premium"), dict):
+            state["premium"] = {}
+        if not isinstance(state["premium"].get(key), dict):
+            state["premium"][key] = {}
         state["premium"][key][option_type] = {
             "ltp": p,
             "oi": oi_val,
@@ -3642,7 +3647,7 @@ def health():
             "socket_flag": bool(state.get("connected")),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "7O-rest-primary-no-premium-charts",
+            "feed_architecture": "7P-rest-primary-type-safe",
             "snapshot_source": "fresh-tick-or-rest",
             "feed_start_owner": "startup-or-kite-callback-only",
             "last_snapshot_age_sec": round(time.time() - last_snapshot_ts, 1) if last_snapshot_ts else None,
@@ -3651,7 +3656,7 @@ def health():
             "rest_fallback_active": rest_fallback_active,
             "last_rest_quote_ist": last_rest_quote_ist,
             "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "7O-rest-primary-request-safe",
+            "reconnect_fix": "7P-rest-primary-type-safe",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
             "stale_restart_in_progress": stale_restart_in_progress,
