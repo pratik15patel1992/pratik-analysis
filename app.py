@@ -653,11 +653,13 @@ def restore_kite_session():
         print("[KITE] Server-side session restored successfully.", flush=True)
         return True
     except Exception as e:
+        # Stage 7K: a transient REST/WebSocket/instrument-discovery failure is
+        # not proof that today's access token is invalid. Keep the Neon token so
+        # a Render restart or explicit reconnect can reuse it.
         print(f"[KITE] Saved session restore failed: {e}", flush=True)
-        clear_access_token()
         with lock:
             state["connected"] = False
-            state["message"] = "Login required"
+            state["message"] = f"Feed startup failed — retry/restart service ({type(e).__name__})"
         return False
 
 
@@ -2440,26 +2442,22 @@ def index():
             base_url=PUBLIC_BASE_URL,
         )
 
-    token = load_access_token()
-
-    if token and not state["connected"]:
-        try:
-            start_live(token)
-
-        except Exception as e:
-            print(
-                f"[DIAG] Existing token failed: {e}",
-                flush=True,
-            )
-
-            clear_access_token()
-
-            with lock:
-                state["connected"] = False
-                state["message"] = (
-                    "Login required"
-                )
-
+    # Stage 7K:
+    # NEVER restart Kite from a normal dashboard page request.
+    #
+    # Previously every GET / request did:
+    #   load_access_token() -> if state["connected"] is False -> start_live()
+    #
+    # start_live() intentionally closes/replaces the existing ticker before
+    # creating a new one. During a transient 1006/reconnect window the flag can
+    # be False even though KiteTicker is already reconnecting. Any browser,
+    # uptime probe or repeated page request could therefore tear down the ticker
+    # again and restart full instrument discovery. Render logs showed exactly
+    # this loop ("Restored today's access token" + "Loading instruments") many
+    # times per hour.
+    #
+    # Feed startup is owned only by process startup restore_kite_session() and
+    # the explicit Zerodha callback after a fresh login.
     return render_template(
         "index.html",
         configured=True,
@@ -3516,15 +3514,16 @@ def health():
             "socket_flag": bool(state.get("connected")),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "7J-nonblocking-live-snapshot",
+            "feed_architecture": "7K-single-owner-feed-lifecycle",
             "snapshot_source": "fresh-tick-or-rest",
+            "feed_start_owner": "startup-or-kite-callback-only",
             "last_snapshot_age_sec": round(time.time() - last_snapshot_ts, 1) if last_snapshot_ts else None,
             "last_persist_ist": last_persist_ist,
             "snapshot_source": "fresh-tick-or-rest",
             "rest_fallback_active": rest_fallback_active,
             "last_rest_quote_ist": last_rest_quote_ist,
             "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "7J-nonblocking-snapshot-persistence",
+            "reconnect_fix": "7K-no-dashboard-feed-restart",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
             "stale_restart_in_progress": stale_restart_in_progress,
