@@ -1540,7 +1540,7 @@ def _strategy_price_at_or_before(target_minutes):
     found = _point_at_or_before(state.get("series", {}).get("nifty", []), target_minutes)
     if not found:
         return None
-    _, row = found
+    row = found
     price = row.get("close", row.get("price"))
     try:
         return float(price)
