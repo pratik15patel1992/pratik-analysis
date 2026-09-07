@@ -63,7 +63,7 @@ def disable_live_api_cache(response):
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
             response.headers["Surrogate-Control"] = "no-store"
-            response.headers["X-Pratik-Live"] = "CLEAN-V2.3"
+            response.headers["X-Pratik-Live"] = "CLEAN-V2.4"
     except Exception:
         pass
     return response
@@ -1899,6 +1899,49 @@ def make_snapshot():
         last_snapshot_ts = time.time()
 
 
+def backfill_oic_cio_to_market_close():
+    """Complete today's OIC/CIO minute grid through 15:30 after market close.
+
+    This is continuity-only backfill. It uses the last recorded OIC/CIO values,
+    tags every added row as carried_forward=True, and never feeds those rows into
+    S1/S2/PNA strategy evaluation.
+    """
+    n = now_ist()
+    now_m = n.hour * 60 + n.minute
+    market_end = MARKET_END_HOUR * 60 + MARKET_END_MINUTE
+
+    # Only do this after the market has actually ended.
+    if now_m < market_end:
+        return 0
+
+    added = 0
+    with lock:
+        for key in ("atm", "minus100", "plus100", "cio"):
+            series = state.get("series", {}).get(key, [])
+            if series:
+                added += _carry_forward_to(
+                    series,
+                    market_end,
+                    include_target=True,
+                )
+
+        if added:
+            state["last_update"] = n.isoformat()
+
+    if added:
+        print(
+            f"[DIAG] Post-market OIC/CIO continuity backfill added {added} rows through 15:30",
+            flush=True,
+        )
+        # Persist the completed day once immediately.
+        try:
+            save_current_history()
+        except Exception as e:
+            print(f"[DIAG] Post-market backfill persist warning: {e}", flush=True)
+
+    return added
+
+
 def snapshot_worker():
     """
     Stage 7J:
@@ -1916,6 +1959,10 @@ def snapshot_worker():
         try:
             if is_market_session():
                 make_snapshot()
+            else:
+                # If this deployment starts after market close, complete any
+                # missing OIC/CIO minutes through 15:30 from the last valid row.
+                backfill_oic_cio_to_market_close()
         except Exception as e:
             print(f"[DIAG] Snapshot ERROR: {e}", flush=True)
 
@@ -2587,6 +2634,7 @@ def repair_strategy_exit_cutoff():
 init_db()
 restore_today_history()
 repair_strategy_exit_cutoff()
+backfill_oic_cio_to_market_close()
 refresh_history_dates()
 # Important for free Render: when GitHub Actions wakes/restarts the service,
 # reconnect to Kite from today's Neon-persisted token without requiring the
@@ -3781,7 +3829,7 @@ def health():
             "socket_flag": bool(state.get("connected")),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "CLEAN-V2.2-EXIT-LOCK",
+            "feed_architecture": "CLEAN-V2.4-POSTMARKET-BACKFILL",
             "snapshot_source": "fresh-tick-or-rest",
             "feed_start_owner": "startup-or-kite-callback-only",
             "last_snapshot_age_sec": round(time.time() - last_snapshot_ts, 1) if last_snapshot_ts else None,
@@ -3790,7 +3838,7 @@ def health():
             "rest_fallback_active": rest_fallback_active,
             "last_rest_quote_ist": last_rest_quote_ist,
             "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "CLEAN-V2.2-CLOSE-RESTORED-OPEN",
+            "reconnect_fix": "CLEAN-V2.4-CARRY-FORWARD-TO-1530",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
             "stale_restart_in_progress": stale_restart_in_progress,
