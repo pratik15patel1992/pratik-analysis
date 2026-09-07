@@ -1997,6 +1997,10 @@ def on_connect(ws, response):
 
 
 def on_close(ws, code, reason):
+    # Ignore a late close callback from an older ticker after a reconnect.
+    if ws is not ticker:
+        print("[DIAG] Ignoring stale WebSocket close callback", flush=True)
+        return
     print(
         f"[DIAG] WebSocket closed {code} {reason}",
         flush=True,
@@ -2010,6 +2014,9 @@ def on_close(ws, code, reason):
 
 
 def on_error(ws, code, reason):
+    # Ignore errors from a ticker instance that has already been replaced.
+    if ws is not ticker:
+        return
     print(
         f"[DIAG] WebSocket ERROR {code} {reason}",
         flush=True,
@@ -2030,74 +2037,51 @@ def start_live(access_token):
     global ticker
     global baseline_ready
 
-    # Prevent the index route, startup restore and watchdog from creating
-    # competing KiteTicker instances at the same time.
+    # Stage 7F: serialize the ENTIRE reconnect operation.  Previously the
+    # mutex ended before the new KiteTicker was created, allowing the
+    # watchdog/browser/startup restore to overlap and replace each other.
     with live_start_mutex:
-        print(
-            "[DIAG] start_live() called",
-            flush=True,
-        )
+        print("[DIAG] start_live() called", flush=True)
 
         with lock:
             state["date"] = today_key()
-            state["message"] = (
-                "Starting Zerodha live feed..."
-            )
+            state["message"] = "Starting Zerodha live feed..."
+            state["connected"] = False
 
-        # Dispose of a stale ticker object before creating a fresh one.
         old_ticker = ticker
         ticker = None
         if old_ticker is not None:
             try:
+                # Detach callbacks before closing so the old socket cannot
+                # mark the newly-created connection as disconnected.
+                old_ticker.on_close = None
+                old_ticker.on_error = None
                 old_ticker.close()
             except Exception:
                 pass
 
-        kite = KiteConnect(
-            api_key=KITE_API_KEY
-        )
+        new_kite = KiteConnect(api_key=KITE_API_KEY)
+        new_kite.set_access_token(access_token)
+        new_kite.profile()
+        discover_instruments(new_kite)
+        kite = new_kite
 
-        kite.set_access_token(
-            access_token
-        )
+        ensure_locked_strike_mappings(kite)
+        baseline_ready = False
 
-        # Synchronous API validation.  If the saved daily token is invalid,
-        # this raises immediately; transient WebSocket failures are handled
-        # separately by the watchdog and do not erase the token.
-        kite.profile()
+        if not baseline_thread_started:
+            threading.Thread(target=build_oi_baseline, daemon=True).start()
 
-        discover_instruments(kite)
+        new_ticker = KiteTicker(KITE_API_KEY, access_token)
+        ticker = new_ticker
+        new_ticker.on_ticks = on_ticks
+        new_ticker.on_connect = on_connect
+        new_ticker.on_close = on_close
+        new_ticker.on_error = on_error
+        new_ticker.connect(threaded=True)
 
-    # Rebuild the three locked OIC + six premium mappings immediately.
-    # The fail-safe also reconstructs opening ATM from the live NIFTY quote
-    # after a Render restart when today's history did not contain it yet.
-    ensure_locked_strike_mappings(kite)
-
-    baseline_ready = False
-
-    if not baseline_thread_started:
-        threading.Thread(
-            target=build_oi_baseline,
-            daemon=True,
-        ).start()
-
-    ticker = KiteTicker(
-        KITE_API_KEY,
-        access_token,
-    )
-
-    ticker.on_ticks = on_ticks
-    ticker.on_connect = on_connect
-    ticker.on_close = on_close
-    ticker.on_error = on_error
-
-    ticker.connect(
-        threaded=True
-    )
-
-    ensure_snapshot_worker()
-    ensure_reconnect_watchdog()
-
+        ensure_snapshot_worker()
+        ensure_reconnect_watchdog()
 
 def reconnect_watchdog():
     """Keep the server-side Kite stream alive during the market session.
@@ -3424,6 +3408,7 @@ def health():
             ),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
+            "reconnect_fix": "7F-serialized",
             "reconnect_in_progress": reconnect_in_progress,
             "date": state.get(
                 "date"
