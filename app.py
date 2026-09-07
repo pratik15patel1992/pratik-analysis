@@ -19,7 +19,7 @@ from flask import (
     url_for,
 )
 
-from kiteconnect import KiteConnect, KiteTicker
+from kiteconnect import KiteConnect
 
 from openpyxl import Workbook
 from openpyxl.chart import LineChart, Reference
@@ -63,7 +63,7 @@ def disable_live_api_cache(response):
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
             response.headers["Surrogate-Control"] = "no-store"
-            response.headers["X-Pratik-Live"] = "7L"
+            response.headers["X-Pratik-Live"] = "CLEAN-V1"
     except Exception:
         pass
     return response
@@ -1003,9 +1003,9 @@ def lock_oic_strikes():
         state["oic"]["atm"] = atm
         state["oic"]["minus100"] = atm - 100
         state["oic"]["plus100"] = atm + 100
-        state["premium"]["atm"] = atm
-        state["premium"]["minus100"] = atm - 100
-        state["premium"]["plus100"] = atm + 100
+        for premium_key in ("atm", "minus100", "plus100"):
+            if not isinstance(state["premium"].get(premium_key), dict):
+                state["premium"][premium_key] = {}
 
     print(
         f"[DIAG] OIC strike mapping={mapping}",
@@ -1767,7 +1767,6 @@ def make_snapshot():
 
     with lock:
         snapshot_current_nifty_candle()
-        snapshot_current_premium_candles()
 
         for key in ("atm", "minus100", "plus100"):
             point = oic_point(key)
@@ -2193,10 +2192,10 @@ def start_live(access_token):
         ensure_rest_backup_worker()
 
         with lock:
-            state["message"] = "Starting Zerodha REST primary feed..."
+            state["message"] = "Starting CLEAN V1 REST live feed..."
             state["connected"] = False
 
-        print("[KITE] Stage 7O REST primary feed initialized.", flush=True)
+        print("[KITE] CLEAN V1 REST primary feed initialized.", flush=True)
     finally:
         if acquired:
             try:
@@ -2253,7 +2252,7 @@ def _apply_rest_quotes(quotes):
 def rest_backup_worker():
     """Stage 7O primary live feed using Zerodha Quote REST API."""
     global rest_fallback_active, rest_quote_errors
-    print("[KITE] Stage 7O REST PRIMARY worker started", flush=True)
+    print("[KITE] CLEAN V1 REST PRIMARY worker started", flush=True)
 
     while True:
         try:
@@ -2267,7 +2266,7 @@ def rest_backup_worker():
                     state["connected"] = True
                     state["message"] = "LIVE — Zerodha REST primary"
 
-                print(f"[KITE] REST PRIMARY live; OI contracts={count}", flush=True)
+                print(f"[KITE] CLEAN V1 REST live; OI contracts={count}", flush=True)
             else:
                 rest_fallback_active = False
 
@@ -2276,9 +2275,9 @@ def rest_backup_worker():
             with lock:
                 state["connected"] = False
                 state["message"] = f"REST live feed warning ({type(e).__name__})"
-            print(f"[KITE] REST PRIMARY warning: {type(e).__name__}: {e}", flush=True)
+            print(f"[KITE] CLEAN V1 REST warning: {type(e).__name__}: {e}", flush=True)
 
-        time.sleep(1.15)
+        time.sleep(2.0)
 
 
 def ensure_rest_backup_worker():
@@ -2360,8 +2359,9 @@ def restore_today_history():
 
         saved_premium = saved.get("premium") or {}
         for premium_key in ("minus100", "atm", "plus100"):
-            if saved_premium.get(premium_key) is not None:
-                state["premium"][premium_key] = saved_premium.get(premium_key)
+            saved_value = saved_premium.get(premium_key)
+            # CLEAN V1 normalizes old chart-era scalar values.
+            state["premium"][premium_key] = saved_value if isinstance(saved_value, dict) else {}
 
         if saved.get(
             "opening_atm"
@@ -2415,7 +2415,6 @@ refresh_history_dates()
 # dashboard to be opened in a browser.
 restore_kite_session()
 ensure_snapshot_worker()
-ensure_reconnect_watchdog()
 
 
 # ============================================================
@@ -2627,52 +2626,13 @@ def kite_logout():
 
 
 
-rest_request_refresh_lock = threading.Lock()
-last_request_rest_refresh_ts = 0.0
-
 def request_rest_refresh_if_due():
-    """Refresh live state from the request-serving process when needed."""
-    global last_request_rest_refresh_ts, rest_quote_errors
-
-    if not is_market_session() or kite is None or not token_meta:
-        return False
-
-    now_ts = time.time()
-    if now_ts - last_request_rest_refresh_ts < 1.05:
-        return False
-
-    if not rest_request_refresh_lock.acquire(blocking=False):
-        return False
-
-    try:
-        now_ts = time.time()
-        if now_ts - last_request_rest_refresh_ts < 1.05:
-            return False
-
-        quotes = kite.quote(_rest_quote_symbols())
-        count = _apply_rest_quotes(quotes)
-        rest_quote_errors = 0
-        last_request_rest_refresh_ts = time.time()
-
-        with lock:
-            state["connected"] = True
-            state["message"] = "LIVE — Zerodha REST primary"
-
-        print(f"[KITE] REQUEST REST refresh; OI contracts={count}", flush=True)
-        return True
-
-    except Exception as e:
-        rest_quote_errors += 1
-        print(f"[KITE] REQUEST REST warning: {type(e).__name__}: {e}", flush=True)
-        return False
-
-    finally:
-        rest_request_refresh_lock.release()
+    # CLEAN V1: background REST worker is the only market-data poller.
+    return False
 
 
 @app.route("/api/state")
 def api_state():
-    request_rest_refresh_if_due()
     with lock:
         return jsonify(state)
 
@@ -2769,8 +2729,7 @@ def api_premium_day(day):
     """Return the six recorded option-premium OHLC series for a session."""
     if day == today_key():
         with lock:
-            snapshot_current_premium_candles()
-            return jsonify({
+                return jsonify({
                 "date": day,
                 "expiry": state.get("expiry"),
                 "opening_atm": state.get("opening_atm"),
@@ -3364,8 +3323,7 @@ def _collect_premium_report(start_text, end_text):
     for day in days:
         if day == today_key():
             with lock:
-                snapshot_current_premium_candles()
-                day_data = json.loads(json.dumps({
+                        day_data = json.loads(json.dumps({
                     "date": day,
                     "opening_atm": state.get("opening_atm"),
                     "premium": state.get("premium", {}),
@@ -3576,8 +3534,7 @@ def download_premium_reports_excel():
 def download_raw_premium_excel(day):
     if day == today_key():
         with lock:
-            snapshot_current_premium_candles()
-            data = json.loads(json.dumps({
+                data = json.loads(json.dumps({
                 "date": day,
                 "expiry": state.get("expiry"),
                 "opening_atm": state.get("opening_atm"),
@@ -3635,7 +3592,6 @@ def download_raw_premium_excel(day):
 
 @app.route("/health")
 def health():
-    request_rest_refresh_if_due()
     return jsonify(
         {
             "ok": True,
@@ -3647,7 +3603,7 @@ def health():
             "socket_flag": bool(state.get("connected")),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "7P-rest-primary-type-safe",
+            "feed_architecture": "CLEAN-V1-REST-PRIMARY",
             "snapshot_source": "fresh-tick-or-rest",
             "feed_start_owner": "startup-or-kite-callback-only",
             "last_snapshot_age_sec": round(time.time() - last_snapshot_ts, 1) if last_snapshot_ts else None,
@@ -3656,7 +3612,7 @@ def health():
             "rest_fallback_active": rest_fallback_active,
             "last_rest_quote_ist": last_rest_quote_ist,
             "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "7P-rest-primary-type-safe",
+            "reconnect_fix": "CLEAN-V1-NO-WEBSOCKET",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
             "stale_restart_in_progress": stale_restart_in_progress,
