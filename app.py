@@ -182,8 +182,15 @@ baseline_thread_started = False
 reconnect_watchdog_started = False
 reconnect_in_progress = False
 last_reconnect_attempt = 0.0
+# Stage 7G: timestamp of the most recent WebSocket tick.  A socket can appear
+# alive while the feed has silently frozen, so health/watchdog must track
+# actual tick freshness rather than connection state alone.
+last_live_tick_ts = 0.0
+last_live_tick_ist = None
+stale_restart_in_progress = False
 live_start_mutex = threading.Lock()
 snapshot_thread_started = False
+PROCESS_START_TS = time.time()
 
 latest_nifty = {}
 latest_vix = {}
@@ -1772,7 +1779,12 @@ def on_ticks(ws, ticks):
     global latest_vix
     global tick_counter
     global oi_tick_counter
+    global last_live_tick_ts
+    global last_live_tick_ist
 
+    # Any received packet proves the stream is alive.
+    last_live_tick_ts = time.time()
+    last_live_tick_ist = now_ist().isoformat()
     tick_counter += len(ticks)
 
     option_oi_in_batch = 0
@@ -2072,7 +2084,16 @@ def start_live(access_token):
         if not baseline_thread_started:
             threading.Thread(target=build_oi_baseline, daemon=True).start()
 
-        new_ticker = KiteTicker(KITE_API_KEY, access_token)
+        # Use KiteTicker's native auto-reconnect. Recreating a Twisted
+        # reactor repeatedly inside one Gunicorn worker is unreliable.
+        new_ticker = KiteTicker(
+            KITE_API_KEY,
+            access_token,
+            reconnect=True,
+            reconnect_max_tries=300,
+            reconnect_max_delay=15,
+            connect_timeout=30,
+        )
         ticker = new_ticker
         new_ticker.on_ticks = on_ticks
         new_ticker.on_connect = on_connect
@@ -2084,51 +2105,52 @@ def start_live(access_token):
         ensure_reconnect_watchdog()
 
 def reconnect_watchdog():
-    """Keep the server-side Kite stream alive during the market session.
+    """Stage 7G feed-health watchdog.
 
-    This is intentionally independent of the browser.  It uses the access
-    token already persisted for today in Neon and retries a disconnected
-    stream at a conservative interval.
+    KiteTicker already has native reconnection.  The earlier watchdog tried to
+    create replacement KiteTicker reactors in the same worker, which can be
+    unreliable after repeated disconnects.  Stage 7G instead watches *tick
+    freshness*.  If the stream is disconnected or receives no ticks for 75
+    seconds during market hours, the worker exits once. Gunicorn immediately
+    starts a fresh worker, and restore_kite_session() reconnects using today's
+    token persisted in Neon.  This gives us a clean WebSocket reactor while
+    preserving today's stored data.
     """
-    global reconnect_in_progress
-    global last_reconnect_attempt
+    global stale_restart_in_progress
 
-    print("[KITE] Reconnect watchdog started", flush=True)
+    print("[KITE] Stage 7G stale-feed watchdog started", flush=True)
 
     while True:
         try:
-            if is_market_session() and not state.get("connected"):
+            if is_market_session():
                 now_ts = time.time()
-                if (
-                    not reconnect_in_progress
-                    and now_ts - last_reconnect_attempt >= 15
-                ):
-                    token = load_access_token()
-                    if token:
-                        reconnect_in_progress = True
-                        last_reconnect_attempt = now_ts
-                        try:
-                            print(
-                                "[KITE] Feed disconnected; attempting automatic reconnect...",
-                                flush=True,
-                            )
-                            start_live(token)
-                        except Exception as e:
-                            # Do not delete today's token for a transient
-                            # WebSocket/network failure.  A genuinely invalid
-                            # token will keep failing profile() and can be
-                            # replaced by the normal Zerodha login flow.
-                            print(
-                                f"[KITE] Automatic reconnect failed: {e}",
-                                flush=True,
-                            )
-                            with lock:
-                                state["connected"] = False
-                                state["message"] = "Reconnecting Zerodha live feed..."
-                        finally:
-                            reconnect_in_progress = False
+                connected = bool(state.get("connected"))
+                age = (now_ts - last_live_tick_ts) if last_live_tick_ts else None
+
+                # Give a newly started worker enough time to establish the
+                # initial connection. If we have never received a tick, only
+                # restart after the feed has had 90 seconds to come alive.
+                started_age = now_ts - PROCESS_START_TS
+                disconnected_too_long = (not connected and started_age > 90)
+                stale_too_long = (connected and age is not None and age > 75)
+
+                if (disconnected_too_long or stale_too_long) and not stale_restart_in_progress:
+                    stale_restart_in_progress = True
+                    reason = "disconnected" if disconnected_too_long else f"stale {age:.0f}s"
+                    print(f"[KITE] Feed unhealthy ({reason}); restarting worker for clean WebSocket...", flush=True)
+                    with lock:
+                        state["connected"] = False
+                        state["message"] = f"Feed unhealthy ({reason}) — restarting live worker..."
+                    try:
+                        # Persist in-progress candles/trades before worker exit.
+                        make_snapshot()
+                    except Exception as e:
+                        print(f"[KITE] Pre-restart snapshot warning: {e}", flush=True)
+                    time.sleep(1)
+                    # Exit only the Gunicorn worker. The master respawns it.
+                    os._exit(1)
         except Exception as e:
-            print(f"[KITE] Watchdog error: {e}", flush=True)
+            print(f"[KITE] Stage 7G watchdog error: {e}", flush=True)
 
         time.sleep(5)
 
@@ -3408,7 +3430,10 @@ def health():
             ),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "reconnect_fix": "7F-serialized",
+            "reconnect_fix": "7G-native-plus-stale-restart",
+            "last_tick_ist": last_live_tick_ist,
+            "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
+            "stale_restart_in_progress": stale_restart_in_progress,
             "reconnect_in_progress": reconnect_in_progress,
             "date": state.get(
                 "date"
