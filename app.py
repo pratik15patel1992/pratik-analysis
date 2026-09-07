@@ -63,7 +63,7 @@ def disable_live_api_cache(response):
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
             response.headers["Surrogate-Control"] = "no-store"
-            response.headers["X-Pratik-Live"] = "CLEAN-V1"
+            response.headers["X-Pratik-Live"] = "CLEAN-V2"
     except Exception:
         pass
     return response
@@ -2189,13 +2189,12 @@ def start_live(access_token):
         ticker = None
 
         ensure_snapshot_worker()
-        ensure_rest_backup_worker()
 
         with lock:
-            state["message"] = "Starting CLEAN V1 REST live feed..."
+            state["message"] = "CLEAN V2 ready — waiting for dashboard refresh..."
             state["connected"] = False
 
-        print("[KITE] CLEAN V1 REST primary feed initialized.", flush=True)
+        print("[KITE] CLEAN V2 session initialized; request-driven REST ready.", flush=True)
     finally:
         if acquired:
             try:
@@ -2281,11 +2280,11 @@ def rest_backup_worker():
 
 
 def ensure_rest_backup_worker():
-    global rest_backup_started
-    if rest_backup_started:
-        return
-    rest_backup_started = True
-    threading.Thread(target=rest_backup_worker, daemon=True, name="kite-rest-backup").start()
+    # CLEAN V2: no background REST worker.
+    # /api/state owns live refresh so the same Gunicorn process that serves
+    # the browser also fetches and snapshots the market data.
+    return
+
 
 def reconnect_watchdog():
     """Stage 7H: observe WebSocket health; do not kill the worker.
@@ -2626,13 +2625,74 @@ def kite_logout():
 
 
 
+rest_request_refresh_lock = threading.Lock()
+last_request_rest_refresh_ts = 0.0
+
 def request_rest_refresh_if_due():
-    # CLEAN V1: background REST worker is the only market-data poller.
-    return False
+    """CLEAN V2 authoritative live refresh.
+
+    The dashboard polls /api/state every 2 seconds. This function performs at
+    most one Zerodha Quote request per ~2 seconds, applies the quotes, and
+    immediately snapshots OIC/CIO/NIFTY in the SAME request-serving process.
+    No WebSocket and no background market-data thread are involved.
+    """
+    global last_request_rest_refresh_ts, rest_quote_errors, rest_fallback_active
+
+    if not is_market_session():
+        return False
+    if kite is None or not token_meta:
+        return False
+
+    now_ts = time.time()
+    if now_ts - last_request_rest_refresh_ts < 1.90:
+        return False
+
+    if not rest_request_refresh_lock.acquire(blocking=False):
+        return False
+
+    try:
+        now_ts = time.time()
+        if now_ts - last_request_rest_refresh_ts < 1.90:
+            return False
+
+        quotes = kite.quote(_rest_quote_symbols())
+        count = _apply_rest_quotes(quotes)
+        last_request_rest_refresh_ts = time.time()
+        rest_quote_errors = 0
+        rest_fallback_active = True
+
+        # Snapshot immediately so the response being returned to the browser
+        # already contains the newest NIFTY / OIC / CIO minute values.
+        make_snapshot()
+
+        with lock:
+            state["connected"] = True
+            state["message"] = "LIVE — CLEAN V2 REST"
+
+        print(
+            f"[KITE] CLEAN V2 request refresh OK; OI contracts={count}",
+            flush=True,
+        )
+        return True
+
+    except Exception as e:
+        rest_quote_errors += 1
+        with lock:
+            state["connected"] = False
+            state["message"] = f"CLEAN V2 REST warning ({type(e).__name__})"
+        print(
+            f"[KITE] CLEAN V2 request refresh ERROR: {type(e).__name__}: {e}",
+            flush=True,
+        )
+        return False
+
+    finally:
+        rest_request_refresh_lock.release()
 
 
 @app.route("/api/state")
 def api_state():
+    request_rest_refresh_if_due()
     with lock:
         return jsonify(state)
 
@@ -3592,6 +3652,7 @@ def download_raw_premium_excel(day):
 
 @app.route("/health")
 def health():
+    request_rest_refresh_if_due()
     return jsonify(
         {
             "ok": True,
@@ -3603,7 +3664,7 @@ def health():
             "socket_flag": bool(state.get("connected")),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "CLEAN-V1-REST-PRIMARY",
+            "feed_architecture": "CLEAN-V2-REQUEST-DRIVEN-REST",
             "snapshot_source": "fresh-tick-or-rest",
             "feed_start_owner": "startup-or-kite-callback-only",
             "last_snapshot_age_sec": round(time.time() - last_snapshot_ts, 1) if last_snapshot_ts else None,
@@ -3612,7 +3673,7 @@ def health():
             "rest_fallback_active": rest_fallback_active,
             "last_rest_quote_ist": last_rest_quote_ist,
             "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "CLEAN-V1-NO-WEBSOCKET",
+            "reconnect_fix": "CLEAN-V2-SAME-PROCESS-REFRESH",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
             "stale_restart_in_progress": stale_restart_in_progress,
