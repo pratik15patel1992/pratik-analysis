@@ -971,6 +971,85 @@ def lock_oic_strikes():
     return len(mapping) == 3
 
 
+def ensure_locked_strike_mappings(k=None):
+    """
+    Fail-safe for the three locked OIC/premium strikes.
+
+    Stage-7 could remain with empty oic_tokens/premium_token_map when the
+    server restored mid-session before state['opening_atm'] had been rebuilt.
+    This routine reconstructs the opening ATM from the best available source
+    and then rebuilds both token maps. It is safe to call repeatedly.
+    """
+    global oic_tokens
+    global premium_token_map
+
+    # Already healthy.
+    if len(oic_tokens) == 3 and len(premium_token_map) == 6:
+        return True
+
+    with lock:
+        atm = state.get("opening_atm")
+        state_nifty = dict(state.get("nifty") or {})
+
+    # First prefer an already-known session open.
+    open_price = state_nifty.get("open") or latest_nifty.get("open")
+    previous_close = (
+        state_nifty.get("previous_close")
+        or latest_nifty.get("previous_close")
+    )
+
+    # If a Render restart happened mid-session and no NIFTY FULL tick has yet
+    # rebuilt the open, fetch one current quote from Kite REST.
+    if not atm and open_price is None and k is not None:
+        try:
+            quote = k.quote(["NSE:NIFTY 50"]) or {}
+            row = quote.get("NSE:NIFTY 50") or {}
+            q_ohlc = row.get("ohlc") or {}
+            open_price = q_ohlc.get("open")
+            previous_close = previous_close or q_ohlc.get("close")
+
+            if row.get("last_price") is not None:
+                latest_nifty["price"] = float(row["last_price"])
+            if open_price is not None:
+                latest_nifty["open"] = float(open_price)
+            if q_ohlc.get("high") is not None:
+                latest_nifty["high"] = float(q_ohlc["high"])
+            if q_ohlc.get("low") is not None:
+                latest_nifty["low"] = float(q_ohlc["low"])
+            if previous_close is not None:
+                latest_nifty["previous_close"] = float(previous_close)
+
+            with lock:
+                state["nifty"] = dict(latest_nifty)
+
+            print(
+                f"[DIAG] Mapping repair quote open={open_price} pc={previous_close}",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[DIAG] Mapping repair quote failed: {e}", flush=True)
+
+    if not atm and open_price is not None:
+        atm = round_to_100(open_price)
+        with lock:
+            state["opening_atm"] = atm
+            if previous_close:
+                state["zone"] = calculate_zone(open_price, previous_close)
+        print(f"[DIAG] Reconstructed opening ATM={atm}", flush=True)
+
+    if not atm:
+        print("[DIAG] Mapping repair waiting for NIFTY session open", flush=True)
+        return False
+
+    ok = lock_oic_strikes()
+
+    print(
+        f"[DIAG] Mapping repair result ok={ok} OIC={len(oic_tokens)}/3 PREMIUM={len(premium_token_map)}/6",
+        flush=True,
+    )
+    return ok and len(premium_token_map) == 6
+
+
 # ============================================================
 # PREVIOUS DAY OI BASELINE
 # ============================================================
@@ -1786,6 +1865,11 @@ def on_ticks(ws, ticks):
                     latest_nifty
                 )
 
+            # Self-heal locked OIC/premium mappings if the process restarted
+            # or mapping initialization was missed.
+            if len(oic_tokens) != 3 or len(premium_token_map) != 6:
+                ensure_locked_strike_mappings()
+
             if (
                 state.get("opening_atm")
                 is None
@@ -1961,11 +2045,10 @@ def start_live(access_token):
 
     discover_instruments(kite)
 
-    # Important:
-    # if opening ATM was restored from today's
-    # history, rebuild OIC token mapping.
-    if state.get("opening_atm"):
-        lock_oic_strikes()
+    # Rebuild the three locked OIC + six premium mappings immediately.
+    # The fail-safe also reconstructs opening ATM from the live NIFTY quote
+    # after a Render restart when today's history did not contain it yet.
+    ensure_locked_strike_mappings(kite)
 
     baseline_ready = False
 
@@ -3261,8 +3344,11 @@ def health():
                 latest_oi
             ),
             "baseline_ready": baseline_ready,
+            "opening_atm": state.get("opening_atm"),
             "oic_tokens": oic_tokens,
+            "oic_mapping_count": len(oic_tokens),
             "premium_tokens": premium_token_map,
+            "premium_mapping_count": len(premium_token_map),
             "premium_points": {
                 key: {
                     option_type: len(
