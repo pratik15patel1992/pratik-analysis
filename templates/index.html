@@ -754,41 +754,11 @@
 
 
         <section class="miInsightGrid">
-            <div class="card">
-                <div class="chartHeader"><div><h3>OPTION PREMIUM SUMMARY</h3><p>Key Levels • current LTP and change from first recorded premium of the session</p></div></div>
-                <table class="miTable"><thead><tr><th>Strike</th><th>CE LTP</th><th>CE %</th><th>PE LTP</th><th>PE %</th></tr></thead><tbody id="miPremiumSummaryRows"><tr><td colspan="5">Waiting for premium data</td></tr></tbody></table>
-            </div>
+            <div></div>
             <div class="card">
                 <div class="chartHeader"><div><h3>CE vs PE PREMIUM PRESSURE</h3><p>Current • directional CE/PE premium movement at each locked strike</p></div></div>
                 <table class="miTable"><thead><tr><th>Strike</th><th>CE</th><th>PE</th><th>Interpretation</th></tr></thead><tbody id="miPremiumPressureRows"><tr><td colspan="4">Waiting for premium data</td></tr></tbody></table>
             </div>
-        </section>
-
-        <section class="miPremiumGrid">
-            <article class="premiumCard" id="card-premium-minus100-CE">
-                <div class="chartHeader"><div><h3 id="premiumTitle-minus100-CE">ATM -100 CE</h3><div class="premiumHeadMeta" id="premiumMeta-minus100-CE">LTP: — • OI: —</div></div><div class="chartControls"><button onclick="premiumFullView('card-premium-minus100-CE')">Full View</button><button onclick="resetPremiumZoom('minus100-CE')">Reset Zoom</button><button class="active" data-group="premium-minus100-CE" onclick="setPremiumInterval('minus100-CE',1,this)">1m</button><button data-group="premium-minus100-CE" onclick="setPremiumInterval('minus100-CE',3,this)">3m</button><button data-group="premium-minus100-CE" onclick="setPremiumInterval('minus100-CE',5,this)">5m</button><button data-group="premium-minus100-CE" onclick="setPremiumInterval('minus100-CE',15,this)">15m</button></div></div>
-                <div class="premiumBox"><canvas id="premium-minus100-CE"></canvas></div><div class="empty" id="empty-premium-minus100-CE">Premium data will appear after live market ticks are recorded.</div><div class="chartStats" id="stats-premium-minus100-CE"></div><div class="zoomHint">Mouse wheel = zoom • drag = pan • Reset Zoom = full session</div>
-            </article>
-            <article class="premiumCard" id="card-premium-atm-CE">
-                <div class="chartHeader"><div><h3 id="premiumTitle-atm-CE">ATM CE</h3><div class="premiumHeadMeta" id="premiumMeta-atm-CE">LTP: — • OI: —</div></div><div class="chartControls"><button onclick="premiumFullView('card-premium-atm-CE')">Full View</button><button onclick="resetPremiumZoom('atm-CE')">Reset Zoom</button><button class="active" data-group="premium-atm-CE" onclick="setPremiumInterval('atm-CE',1,this)">1m</button><button data-group="premium-atm-CE" onclick="setPremiumInterval('atm-CE',3,this)">3m</button><button data-group="premium-atm-CE" onclick="setPremiumInterval('atm-CE',5,this)">5m</button><button data-group="premium-atm-CE" onclick="setPremiumInterval('atm-CE',15,this)">15m</button></div></div>
-                <div class="premiumBox"><canvas id="premium-atm-CE"></canvas></div><div class="empty" id="empty-premium-atm-CE">Premium data will appear after live market ticks are recorded.</div><div class="chartStats" id="stats-premium-atm-CE"></div><div class="zoomHint">Mouse wheel = zoom • drag = pan • Reset Zoom = full session</div>
-            </article>
-            <article class="premiumCard" id="card-premium-plus100-CE">
-                <div class="chartHeader"><div><h3 id="premiumTitle-plus100-CE">ATM +100 CE</h3><div class="premiumHeadMeta" id="premiumMeta-plus100-CE">LTP: — • OI: —</div></div><div class="chartControls"><button onclick="premiumFullView('card-premium-plus100-CE')">Full View</button><button onclick="resetPremiumZoom('plus100-CE')">Reset Zoom</button><button class="active" data-group="premium-plus100-CE" onclick="setPremiumInterval('plus100-CE',1,this)">1m</button><button data-group="premium-plus100-CE" onclick="setPremiumInterval('plus100-CE',3,this)">3m</button><button data-group="premium-plus100-CE" onclick="setPremiumInterval('plus100-CE',5,this)">5m</button><button data-group="premium-plus100-CE" onclick="setPremiumInterval('plus100-CE',15,this)">15m</button></div></div>
-                <div class="premiumBox"><canvas id="premium-plus100-CE"></canvas></div><div class="empty" id="empty-premium-plus100-CE">Premium data will appear after live market ticks are recorded.</div><div class="chartStats" id="stats-premium-plus100-CE"></div><div class="zoomHint">Mouse wheel = zoom • drag = pan • Reset Zoom = full session</div>
-            </article>
-            <article class="premiumCard" id="card-premium-minus100-PE">
-                <div class="chartHeader"><div><h3 id="premiumTitle-minus100-PE">ATM -100 PE</h3><div class="premiumHeadMeta" id="premiumMeta-minus100-PE">LTP: — • OI: —</div></div><div class="chartControls"><button onclick="premiumFullView('card-premium-minus100-PE')">Full View</button><button onclick="resetPremiumZoom('minus100-PE')">Reset Zoom</button><button class="active" data-group="premium-minus100-PE" onclick="setPremiumInterval('minus100-PE',1,this)">1m</button><button data-group="premium-minus100-PE" onclick="setPremiumInterval('minus100-PE',3,this)">3m</button><button data-group="premium-minus100-PE" onclick="setPremiumInterval('minus100-PE',5,this)">5m</button><button data-group="premium-minus100-PE" onclick="setPremiumInterval('minus100-PE',15,this)">15m</button></div></div>
-                <div class="premiumBox"><canvas id="premium-minus100-PE"></canvas></div><div class="empty" id="empty-premium-minus100-PE">Premium data will appear after live market ticks are recorded.</div><div class="chartStats" id="stats-premium-minus100-PE"></div><div class="zoomHint">Mouse wheel = zoom • drag = pan • Reset Zoom = full session</div>
-            </article>
-            <article class="premiumCard" id="card-premium-atm-PE">
-                <div class="chartHeader"><div><h3 id="premiumTitle-atm-PE">ATM PE</h3><div class="premiumHeadMeta" id="premiumMeta-atm-PE">LTP: — • OI: —</div></div><div class="chartControls"><button onclick="premiumFullView('card-premium-atm-PE')">Full View</button><button onclick="resetPremiumZoom('atm-PE')">Reset Zoom</button><button class="active" data-group="premium-atm-PE" onclick="setPremiumInterval('atm-PE',1,this)">1m</button><button data-group="premium-atm-PE" onclick="setPremiumInterval('atm-PE',3,this)">3m</button><button data-group="premium-atm-PE" onclick="setPremiumInterval('atm-PE',5,this)">5m</button><button data-group="premium-atm-PE" onclick="setPremiumInterval('atm-PE',15,this)">15m</button></div></div>
-                <div class="premiumBox"><canvas id="premium-atm-PE"></canvas></div><div class="empty" id="empty-premium-atm-PE">Premium data will appear after live market ticks are recorded.</div><div class="chartStats" id="stats-premium-atm-PE"></div><div class="zoomHint">Mouse wheel = zoom • drag = pan • Reset Zoom = full session</div>
-            </article>
-            <article class="premiumCard" id="card-premium-plus100-PE">
-                <div class="chartHeader"><div><h3 id="premiumTitle-plus100-PE">ATM +100 PE</h3><div class="premiumHeadMeta" id="premiumMeta-plus100-PE">LTP: — • OI: —</div></div><div class="chartControls"><button onclick="premiumFullView('card-premium-plus100-PE')">Full View</button><button onclick="resetPremiumZoom('plus100-PE')">Reset Zoom</button><button class="active" data-group="premium-plus100-PE" onclick="setPremiumInterval('plus100-PE',1,this)">1m</button><button data-group="premium-plus100-PE" onclick="setPremiumInterval('plus100-PE',3,this)">3m</button><button data-group="premium-plus100-PE" onclick="setPremiumInterval('plus100-PE',5,this)">5m</button><button data-group="premium-plus100-PE" onclick="setPremiumInterval('plus100-PE',15,this)">15m</button></div></div>
-                <div class="premiumBox"><canvas id="premium-plus100-PE"></canvas></div><div class="empty" id="empty-premium-plus100-PE">Premium data will appear after live market ticks are recorded.</div><div class="chartStats" id="stats-premium-plus100-PE"></div><div class="zoomHint">Mouse wheel = zoom • drag = pan • Reset Zoom = full session</div>
-            </article>
         </section>
 
         <section class="miFoot">
@@ -1315,7 +1285,10 @@ function updateMarketPage(state){
     document.getElementById("miVix").textContent=indianNumber(v.price);
     document.getElementById("miVixBand").textContent=v.range || "—";
     let active=0,totalPoints=0;
-    for(const def of premiumDefs){const raw=premiumSeries(state,def.key,def.type);if(raw.length){active++;totalPoints+=raw.length;}updatePremiumChart(def,state);}
+    for(const def of premiumDefs){
+        const raw=premiumSeries(state,def.key,def.type);
+        if(raw.length){active++;totalPoints+=raw.length;}
+    }
     document.getElementById("miRecorder").textContent=`${active} / 6`;
     document.getElementById("miRecorderMeta").textContent=active?`${totalPoints} premium minute candle records available across contracts`:`Waiting for option ticks`;
     updatePremiumInsightTables(state);
@@ -1869,26 +1842,42 @@ function restoreTheme(){
 
 
 function ensurePremiumInsightPanels(){
+    // LOCKED Market Intelligence layout:
+    // - OIC + CIO tab: unchanged
+    // - NIFTY tab: unchanged
+    // - REPORTS tab: unchanged
+    // - MARKET INTELLIGENCE: no six premium charts and no Option Premium Summary.
+    //   Premium Recorder + CE vs PE Premium Pressure remain unchanged.
     const page = document.getElementById("pageMarket");
     if(!page) return;
-    const grid = page.querySelector(".miPremiumGrid");
-    if(!grid) return;
 
     let insights = page.querySelector(".miInsightGrid");
     if(!insights){
+        const toolbar = page.querySelector(".miToolbar");
         insights = document.createElement("section");
         insights.className = "miInsightGrid";
         insights.innerHTML = `
-            <div class="card">
-                <div class="chartHeader"><div><h3>OPTION PREMIUM SUMMARY</h3><p>Key Levels • current LTP and change from first recorded premium of the session</p></div></div>
-                <table class="miTable"><thead><tr><th>Strike</th><th>CE LTP</th><th>CE %</th><th>PE LTP</th><th>PE %</th></tr></thead><tbody id="miPremiumSummaryRows"><tr><td colspan="5">Waiting for premium data</td></tr></tbody></table>
-            </div>
+            <div></div>
             <div class="card">
                 <div class="chartHeader"><div><h3>CE vs PE PREMIUM PRESSURE</h3><p>Current • directional CE/PE premium movement at each locked strike</p></div></div>
                 <table class="miTable"><thead><tr><th>Strike</th><th>CE</th><th>PE</th><th>Interpretation</th></tr></thead><tbody id="miPremiumPressureRows"><tr><td colspan="4">Waiting for premium data</td></tr></tbody></table>
             </div>`;
-        grid.parentNode.insertBefore(insights, grid);
+        if(toolbar && toolbar.parentNode){
+            toolbar.parentNode.insertBefore(insights, toolbar.nextSibling);
+        } else {
+            page.appendChild(insights);
+        }
     }
+
+    // Remove legacy premium summary/chart blocks if an older cached DOM
+    // somehow survives a hot reload.
+    const summary = page.querySelector("#miPremiumSummaryRows");
+    if(summary){
+        const card = summary.closest(".card");
+        if(card) card.remove();
+    }
+    page.querySelectorAll(".miPremiumGrid").forEach(el => el.remove());
+
     insights.style.display = "grid";
     insights.style.visibility = "visible";
     insights.style.opacity = "1";
