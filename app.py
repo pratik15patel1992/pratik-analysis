@@ -3036,6 +3036,12 @@ def download_cio_excel(day):
     ws["B5"] = data.get("opening_atm")
     ws["A6"] = "Nearest Expiry"
     ws["B6"] = data.get("expiry")
+    ws["D4"] = "Data Quality"
+    ws["E4"] = "LIVE = genuine recorded minute"
+    ws["D5"] = "CARRIED FORWARD"
+    ws["E5"] = "Continuity only — last valid value repeated; exclude from strategy/backtest"
+    ws["D6"] = "INCOMPLETE"
+    ws["E6"] = "One or more OIC/CIO components missing"
 
     headers = [
         "Time",
@@ -3045,12 +3051,17 @@ def download_cio_excel(day):
         "NIFTY Close",
         "ATM -100 CE OI",
         "ATM -100 PE OI",
+        "ATM -100 Source",
         "ATM CE OI",
         "ATM PE OI",
+        "ATM Source",
         "ATM +100 CE OI",
         "ATM +100 PE OI",
+        "ATM +100 Source",
         "CIO CE Negative Change in OI",
         "CIO PE Negative Change in OI",
+        "CIO Source",
+        "Row Quality",
     ]
     header_row = 8
     for col, value in enumerate(headers, 1):
@@ -3067,22 +3078,47 @@ def download_cio_excel(day):
         # Older stored days may contain only ``price``.  For those rows,
         # fall back to that value so historical downloads remain readable.
         fallback_price = n.get("price")
+        def source_label(row):
+            if not row:
+                return "MISSING"
+            return "CARRIED FORWARD" if row.get("carried_forward") else "LIVE"
+
+        m_source = source_label(m)
+        a_source = source_label(a)
+        p_source = source_label(p)
+        c_source = source_label(c)
+
+        quality_sources = (m_source, a_source, p_source, c_source)
+        if "MISSING" in quality_sources:
+            row_quality = "INCOMPLETE"
+        elif "CARRIED FORWARD" in quality_sources:
+            row_quality = "CARRIED FORWARD"
+        else:
+            row_quality = "LIVE"
+
         values = [
             t,
             n.get("open", fallback_price),
             n.get("high", fallback_price),
             n.get("low", fallback_price),
             n.get("close", fallback_price),
-            m.get("ce"), m.get("pe"),
-            a.get("ce"), a.get("pe"),
-            p.get("ce"), p.get("pe"),
-            c.get("ce"), c.get("pe"),
+            m.get("ce"), m.get("pe"), m_source,
+            a.get("ce"), a.get("pe"), a_source,
+            p.get("ce"), p.get("pe"), p_source,
+            c.get("ce"), c.get("pe"), c_source,
+            row_quality,
         ]
         for col, value in enumerate(values, 1):
             ws.cell(row=row_no, column=col, value=value)
 
     ws.freeze_panes = "A9"
-    widths = [14, 16, 16, 16, 16, 20, 20, 20, 20, 20, 20, 32, 32]
+    widths = [
+        14, 16, 16, 16, 16,
+        20, 20, 20,
+        20, 20, 20,
+        20, 20, 20,
+        32, 32, 20, 20,
+    ]
     for i, width in enumerate(widths, 1):
         ws.column_dimensions[chr(64+i)].width = width
 
@@ -3829,7 +3865,7 @@ def health():
             "socket_flag": bool(state.get("connected")),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "CLEAN-V2.4-POSTMARKET-BACKFILL",
+            "feed_architecture": "CLEAN-V2.5-DATA-QUALITY-LABELS",
             "snapshot_source": "fresh-tick-or-rest",
             "feed_start_owner": "startup-or-kite-callback-only",
             "last_snapshot_age_sec": round(time.time() - last_snapshot_ts, 1) if last_snapshot_ts else None,
@@ -3838,7 +3874,7 @@ def health():
             "rest_fallback_active": rest_fallback_active,
             "last_rest_quote_ist": last_rest_quote_ist,
             "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "CLEAN-V2.4-CARRY-FORWARD-TO-1530",
+            "reconnect_fix": "CLEAN-V2.5-QUALITY-AWARE-EXPORT",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
             "stale_restart_in_progress": stale_restart_in_progress,
