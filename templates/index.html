@@ -1290,7 +1290,7 @@ function updateMarketPage(state){
         if(raw.length){active++;totalPoints+=raw.length;}
     }
     document.getElementById("miRecorder").textContent=`${active} / 6`;
-    document.getElementById("miRecorderMeta").textContent=active?`${totalPoints} premium minute candle records available across contracts`:`Waiting for option ticks`;
+    document.getElementById("miRecorderMeta").textContent=active?`${totalPoints} premium minute records available across contracts`:`Waiting for option ticks`;
     updatePremiumInsightTables(state);
     updateOverallMarketState(state);
 }
@@ -1325,7 +1325,6 @@ function initCharts(){
     charts.minus100 = makeChart("chart-minus100");
     charts.plus100 = makeChart("chart-plus100");
     charts.cio = makeChart("chart-cio", true);
-    for(const def of premiumDefs){ charts[`premium-${def.id}`] = makePremiumChart(`premium-${def.id}`); }
 }
 
 function updateChart(key, state){
@@ -1891,11 +1890,15 @@ async function boot(){
     await loadLive();
     await loadHistoryDates();
 
-    setInterval(loadLive, 5000);
+    setInterval(loadLive, 2000);
     setInterval(loadHistoryDates, 60000);
 }
 
-boot();
+boot().catch(err=>{
+    console.error("CLEAN V1 boot error", err);
+    const status=document.getElementById("statusText");
+    if(status) status.textContent="Dashboard startup error — refresh page";
+});
 </script>
 
 </body>
