@@ -1380,6 +1380,44 @@ def snapshot_current_nifty_candle():
         )
 
 
+
+def update_premium_lightweight(token, price, oi=None):
+    """Record only minute close/LTP + OI needed by pressure/reports."""
+    meta = premium_token_map.get(token)
+    if not meta or price is None:
+        return
+
+    key = meta["key"]
+    option_type = meta["type"]
+    minute = now_ist().strftime("%H:%M")
+    timestamp = now_ist().isoformat()
+    p = float(price)
+    oi_val = int(oi) if oi is not None else None
+
+    rows = state["series"]["premium"][key][option_type]
+    point = {
+        "time": minute,
+        "timestamp": timestamp,
+        "close": p,
+        "price": p,
+        "oi": oi_val,
+    }
+
+    if rows and rows[-1].get("time") == minute:
+        rows[-1].update(point)
+    else:
+        rows.append(point)
+
+    with lock:
+        state["premium"][key] = state["premium"].get(key) or {}
+        state["premium"][key][option_type] = {
+            "ltp": p,
+            "oi": oi_val,
+            "time": minute,
+            "timestamp": timestamp,
+        }
+
+
 def update_premium_minute_ohlc(token, price, oi=None):
     """Aggregate one of the six locked option contracts into true 1-minute OHLC."""
     global premium_minute_buckets
@@ -2003,7 +2041,7 @@ def on_ticks(ws, ticks):
             premium_price = q.get("last_price")
             premium_oi = q.get("oi")
             if premium_price is not None:
-                update_premium_minute_ohlc(token, premium_price, premium_oi)
+                update_premium_lightweight(token, premium_price, premium_oi)
 
         # OPTION OI
         if token in token_meta:
@@ -2143,26 +2181,17 @@ def start_live(access_token):
         if not baseline_thread_started:
             threading.Thread(target=build_oi_baseline, daemon=True).start()
 
-        # Use KiteTicker's native auto-reconnect. Recreating a Twisted
-        # reactor repeatedly inside one Gunicorn worker is unreliable.
-        new_ticker = KiteTicker(
-            KITE_API_KEY,
-            access_token,
-            reconnect=True,
-            reconnect_max_tries=300,
-            reconnect_max_delay=15,
-            connect_timeout=30,
-        )
-        ticker = new_ticker
-        new_ticker.on_ticks = on_ticks
-        new_ticker.on_connect = on_connect
-        new_ticker.on_close = on_close
-        new_ticker.on_error = on_error
-        new_ticker.connect(threaded=True)
+        # Stage 7O: REST Quote is the primary authoritative live feed.
+        ticker = None
 
         ensure_snapshot_worker()
-        ensure_reconnect_watchdog()
         ensure_rest_backup_worker()
+
+        with lock:
+            state["message"] = "Starting Zerodha REST primary feed..."
+            state["connected"] = False
+
+        print("[KITE] Stage 7O REST primary feed initialized.", flush=True)
     finally:
         if acquired:
             try:
@@ -2208,7 +2237,7 @@ def _apply_rest_quotes(quotes):
                 latest_oi[token] = int(oi)
                 option_updates += 1
             if token in premium_token_map and q.get("last_price") is not None:
-                update_premium_minute_ohlc(token, q.get("last_price"), oi)
+                update_premium_lightweight(token, q.get("last_price"), oi)
     last_rest_quote_ts = time.time()
     last_rest_quote_ist = now_ist().isoformat()
     with lock:
@@ -2217,35 +2246,35 @@ def _apply_rest_quotes(quotes):
     return option_updates
 
 def rest_backup_worker():
-    """Stage 7H hybrid feed. WebSocket remains primary; Quote API bridges silent freezes.
-
-    Zerodha documents Quote at 1 request/second and up to 500 instruments per
-    full-quote request. We request all nearest-expiry NIFTY options plus NIFTY/VIX
-    in ONE request, only after WebSocket ticks have been stale for 8 seconds.
-    """
+    """Stage 7O primary live feed using Zerodha Quote REST API."""
     global rest_fallback_active, rest_quote_errors
-    print("[KITE] Stage 7H REST backup worker started", flush=True)
+    print("[KITE] Stage 7O REST PRIMARY worker started", flush=True)
+
     while True:
         try:
             if is_market_session() and kite is not None and token_meta:
-                age = (time.time() - last_live_tick_ts) if last_live_tick_ts else 999
-                if age > 8:
-                    rest_fallback_active = True
-                    quotes = kite.quote(_rest_quote_symbols())
-                    count = _apply_rest_quotes(quotes)
-                    rest_quote_errors = 0
-                    print(f"[KITE] REST backup live; OI contracts={count}", flush=True)
-                else:
-                    if rest_fallback_active:
-                        print("[KITE] WebSocket ticks resumed; REST backup standing by", flush=True)
-                    rest_fallback_active = False
+                rest_fallback_active = True
+                quotes = kite.quote(_rest_quote_symbols())
+                count = _apply_rest_quotes(quotes)
+                rest_quote_errors = 0
+
+                with lock:
+                    state["connected"] = True
+                    state["message"] = "LIVE — Zerodha REST primary"
+
+                print(f"[KITE] REST PRIMARY live; OI contracts={count}", flush=True)
             else:
                 rest_fallback_active = False
+
         except Exception as e:
             rest_quote_errors += 1
-            print(f"[KITE] REST backup warning: {e}", flush=True)
-        # Quote endpoint is limited to 1 request/sec. Keep a safe margin.
-        time.sleep(1.15 if rest_fallback_active else 2.0)
+            with lock:
+                state["connected"] = False
+                state["message"] = f"REST live feed warning ({type(e).__name__})"
+            print(f"[KITE] REST PRIMARY warning: {type(e).__name__}: {e}", flush=True)
+
+        time.sleep(1.15)
+
 
 def ensure_rest_backup_worker():
     global rest_backup_started
@@ -2592,8 +2621,53 @@ def kite_logout():
     return redirect("/")
 
 
+
+rest_request_refresh_lock = threading.Lock()
+last_request_rest_refresh_ts = 0.0
+
+def request_rest_refresh_if_due():
+    """Refresh live state from the request-serving process when needed."""
+    global last_request_rest_refresh_ts, rest_quote_errors
+
+    if not is_market_session() or kite is None or not token_meta:
+        return False
+
+    now_ts = time.time()
+    if now_ts - last_request_rest_refresh_ts < 1.05:
+        return False
+
+    if not rest_request_refresh_lock.acquire(blocking=False):
+        return False
+
+    try:
+        now_ts = time.time()
+        if now_ts - last_request_rest_refresh_ts < 1.05:
+            return False
+
+        quotes = kite.quote(_rest_quote_symbols())
+        count = _apply_rest_quotes(quotes)
+        rest_quote_errors = 0
+        last_request_rest_refresh_ts = time.time()
+
+        with lock:
+            state["connected"] = True
+            state["message"] = "LIVE — Zerodha REST primary"
+
+        print(f"[KITE] REQUEST REST refresh; OI contracts={count}", flush=True)
+        return True
+
+    except Exception as e:
+        rest_quote_errors += 1
+        print(f"[KITE] REQUEST REST warning: {type(e).__name__}: {e}", flush=True)
+        return False
+
+    finally:
+        rest_request_refresh_lock.release()
+
+
 @app.route("/api/state")
 def api_state():
+    request_rest_refresh_if_due()
     with lock:
         return jsonify(state)
 
@@ -3556,6 +3630,7 @@ def download_raw_premium_excel(day):
 
 @app.route("/health")
 def health():
+    request_rest_refresh_if_due()
     return jsonify(
         {
             "ok": True,
@@ -3567,7 +3642,7 @@ def health():
             "socket_flag": bool(state.get("connected")),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "7M-callback-feed-recovery",
+            "feed_architecture": "7O-rest-primary-no-premium-charts",
             "snapshot_source": "fresh-tick-or-rest",
             "feed_start_owner": "startup-or-kite-callback-only",
             "last_snapshot_age_sec": round(time.time() - last_snapshot_ts, 1) if last_snapshot_ts else None,
@@ -3576,7 +3651,7 @@ def health():
             "rest_fallback_active": rest_fallback_active,
             "last_rest_quote_ist": last_rest_quote_ist,
             "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "7N-synchronous-kite-callback",
+            "reconnect_fix": "7O-rest-primary-request-safe",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
             "stale_restart_in_progress": stale_restart_in_progress,
