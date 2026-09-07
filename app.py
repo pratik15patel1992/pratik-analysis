@@ -2108,7 +2108,10 @@ def start_live(access_token):
     # Stage 7F: serialize the ENTIRE reconnect operation.  Previously the
     # mutex ended before the new KiteTicker was created, allowing the
     # watchdog/browser/startup restore to overlap and replace each other.
-    with live_start_mutex:
+    acquired = live_start_mutex.acquire(timeout=8)
+    if not acquired:
+        print("[KITE] Feed-start mutex busy >8s; forcing fresh callback-owned startup.", flush=True)
+    try:
         print("[DIAG] start_live() called", flush=True)
 
         with lock:
@@ -2160,6 +2163,12 @@ def start_live(access_token):
         ensure_snapshot_worker()
         ensure_reconnect_watchdog()
         ensure_rest_backup_worker()
+    finally:
+        if acquired:
+            try:
+                live_start_mutex.release()
+            except RuntimeError:
+                pass
 
 def _rest_quote_symbols():
     """All instruments needed for a complete live fallback in one Quote request."""
@@ -2529,9 +2538,13 @@ def kite_callback():
         access_token
     )
 
-    start_live(
-        access_token
-    )
+    print("[KITE] Fresh Zerodha callback accepted; launching live feed.", flush=True)
+    threading.Thread(
+        target=start_live,
+        args=(access_token,),
+        daemon=True,
+        name="kite-callback-live-start",
+    ).start()
 
     return redirect("/")
 
@@ -3536,7 +3549,7 @@ def health():
             "socket_flag": bool(state.get("connected")),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "7L-no-cache-live-api",
+            "feed_architecture": "7M-callback-feed-recovery",
             "snapshot_source": "fresh-tick-or-rest",
             "feed_start_owner": "startup-or-kite-callback-only",
             "last_snapshot_age_sec": round(time.time() - last_snapshot_ts, 1) if last_snapshot_ts else None,
