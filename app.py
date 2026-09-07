@@ -188,6 +188,12 @@ last_reconnect_attempt = 0.0
 last_live_tick_ts = 0.0
 last_live_tick_ist = None
 stale_restart_in_progress = False
+# Stage 7H: REST quote backup activates only when WebSocket ticks are stale.
+rest_backup_started = False
+rest_fallback_active = False
+last_rest_quote_ts = 0.0
+last_rest_quote_ist = None
+rest_quote_errors = 0
 live_start_mutex = threading.Lock()
 snapshot_thread_started = False
 PROCESS_START_TS = time.time()
@@ -1674,7 +1680,7 @@ def evaluate_live_strategies():
             _enter_strategy("PNA", direction, p, f"{votes}/3 + MasterD {metrics['master_d']:+.1f} + CIO, 3 readings", metrics)
 
 def make_snapshot():
-    if not state.get("connected"):
+    if not (state.get("connected") or rest_fallback_active):
         return
 
     with lock:
@@ -1731,7 +1737,7 @@ def snapshot_worker():
     while True:
         try:
             if (
-                state.get("connected")
+                (state.get("connected") or rest_fallback_active)
                 and is_market_session()
             ):
                 make_snapshot()
@@ -2103,56 +2109,109 @@ def start_live(access_token):
 
         ensure_snapshot_worker()
         ensure_reconnect_watchdog()
+        ensure_rest_backup_worker()
+
+def _rest_quote_symbols():
+    """All instruments needed for a complete live fallback in one Quote request."""
+    symbols = ["NSE:NIFTY 50", "NSE:INDIA VIX"]
+    symbols.extend(f"NFO:{meta['symbol']}" for meta in token_meta.values())
+    return symbols
+
+def _apply_rest_quotes(quotes):
+    """Apply REST Quote payload without pretending it was a WebSocket tick."""
+    global latest_nifty, latest_vix, last_rest_quote_ts, last_rest_quote_ist
+    option_updates = 0
+    for key, q in (quotes or {}).items():
+        token = int(q.get("instrument_token") or 0)
+        if token == nifty_token or key == "NSE:NIFTY 50":
+            price = q.get("last_price")
+            ohlc = q.get("ohlc") or {}
+            if price is not None:
+                latest_nifty["price"] = float(price)
+                update_nifty_minute_ohlc(price)
+            for src_key, dst_key in (("open","open"),("high","high"),("low","low"),("close","previous_close")):
+                if ohlc.get(src_key) is not None:
+                    latest_nifty[dst_key] = float(ohlc[src_key])
+            p, pc = latest_nifty.get("price"), latest_nifty.get("previous_close")
+            if p is not None and pc:
+                latest_nifty["change"] = round(p-pc,2)
+                latest_nifty["change_pct"] = round(((p-pc)/pc)*100,3)
+            with lock:
+                state["nifty"] = dict(latest_nifty)
+        elif token == vix_token or key == "NSE:INDIA VIX":
+            if q.get("last_price") is not None:
+                latest_vix["price"] = float(q["last_price"])
+                with lock:
+                    state["vix"] = dict(latest_vix)
+        if token in token_meta:
+            oi = q.get("oi")
+            if oi is not None:
+                latest_oi[token] = int(oi)
+                option_updates += 1
+            if token in premium_token_map and q.get("last_price") is not None:
+                update_premium_minute_ohlc(token, q.get("last_price"), oi)
+    last_rest_quote_ts = time.time()
+    last_rest_quote_ist = now_ist().isoformat()
+    with lock:
+        state["last_update"] = last_rest_quote_ist
+        state["message"] = "LIVE — Zerodha REST backup"
+    return option_updates
+
+def rest_backup_worker():
+    """Stage 7H hybrid feed. WebSocket remains primary; Quote API bridges silent freezes.
+
+    Zerodha documents Quote at 1 request/second and up to 500 instruments per
+    full-quote request. We request all nearest-expiry NIFTY options plus NIFTY/VIX
+    in ONE request, only after WebSocket ticks have been stale for 8 seconds.
+    """
+    global rest_fallback_active, rest_quote_errors
+    print("[KITE] Stage 7H REST backup worker started", flush=True)
+    while True:
+        try:
+            if is_market_session() and kite is not None and token_meta:
+                age = (time.time() - last_live_tick_ts) if last_live_tick_ts else 999
+                if age > 8:
+                    rest_fallback_active = True
+                    quotes = kite.quote(_rest_quote_symbols())
+                    count = _apply_rest_quotes(quotes)
+                    rest_quote_errors = 0
+                    print(f"[KITE] REST backup live; OI contracts={count}", flush=True)
+                else:
+                    if rest_fallback_active:
+                        print("[KITE] WebSocket ticks resumed; REST backup standing by", flush=True)
+                    rest_fallback_active = False
+            else:
+                rest_fallback_active = False
+        except Exception as e:
+            rest_quote_errors += 1
+            print(f"[KITE] REST backup warning: {e}", flush=True)
+        # Quote endpoint is limited to 1 request/sec. Keep a safe margin.
+        time.sleep(1.15 if rest_fallback_active else 2.0)
+
+def ensure_rest_backup_worker():
+    global rest_backup_started
+    if rest_backup_started:
+        return
+    rest_backup_started = True
+    threading.Thread(target=rest_backup_worker, daemon=True, name="kite-rest-backup").start()
 
 def reconnect_watchdog():
-    """Stage 7G feed-health watchdog.
+    """Stage 7H: observe WebSocket health; do not kill the worker.
 
-    KiteTicker already has native reconnection.  The earlier watchdog tried to
-    create replacement KiteTicker reactors in the same worker, which can be
-    unreliable after repeated disconnects.  Stage 7G instead watches *tick
-    freshness*.  If the stream is disconnected or receives no ticks for 75
-    seconds during market hours, the worker exits once. Gunicorn immediately
-    starts a fresh worker, and restore_kite_session() reconnects using today's
-    token persisted in Neon.  This gives us a clean WebSocket reactor while
-    preserving today's stored data.
+    KiteTicker native reconnect remains enabled. If it silently stalls, the REST
+    backup worker keeps OI/NIFTY/premium data moving until WebSocket ticks resume.
     """
-    global stale_restart_in_progress
-
-    print("[KITE] Stage 7G stale-feed watchdog started", flush=True)
-
+    print("[KITE] Stage 7H hybrid-feed watchdog started", flush=True)
     while True:
         try:
             if is_market_session():
-                now_ts = time.time()
-                connected = bool(state.get("connected"))
-                age = (now_ts - last_live_tick_ts) if last_live_tick_ts else None
-
-                # Give a newly started worker enough time to establish the
-                # initial connection. If we have never received a tick, only
-                # restart after the feed has had 90 seconds to come alive.
-                started_age = now_ts - PROCESS_START_TS
-                disconnected_too_long = (not connected and started_age > 90)
-                stale_too_long = (connected and age is not None and age > 75)
-
-                if (disconnected_too_long or stale_too_long) and not stale_restart_in_progress:
-                    stale_restart_in_progress = True
-                    reason = "disconnected" if disconnected_too_long else f"stale {age:.0f}s"
-                    print(f"[KITE] Feed unhealthy ({reason}); restarting worker for clean WebSocket...", flush=True)
+                age = (time.time() - last_live_tick_ts) if last_live_tick_ts else None
+                if age is not None and age > 8 and not rest_fallback_active:
                     with lock:
-                        state["connected"] = False
-                        state["message"] = f"Feed unhealthy ({reason}) — restarting live worker..."
-                    try:
-                        # Persist in-progress candles/trades before worker exit.
-                        make_snapshot()
-                    except Exception as e:
-                        print(f"[KITE] Pre-restart snapshot warning: {e}", flush=True)
-                    time.sleep(1)
-                    # Exit only the Gunicorn worker. The master respawns it.
-                    os._exit(1)
+                        state["message"] = f"WebSocket stale {age:.0f}s — starting REST backup..."
         except Exception as e:
-            print(f"[KITE] Stage 7G watchdog error: {e}", flush=True)
-
-        time.sleep(5)
+            print(f"[KITE] Stage 7H watchdog error: {e}", flush=True)
+        time.sleep(3)
 
 
 def ensure_reconnect_watchdog():
@@ -3430,6 +3489,10 @@ def health():
             ),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
+            "feed_architecture": "7H-hybrid-websocket-rest-backup",
+            "rest_fallback_active": rest_fallback_active,
+            "last_rest_quote_ist": last_rest_quote_ist,
+            "rest_quote_errors": rest_quote_errors,
             "reconnect_fix": "7G-native-plus-stale-restart",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
