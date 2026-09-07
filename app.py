@@ -63,7 +63,7 @@ def disable_live_api_cache(response):
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
             response.headers["Surrogate-Control"] = "no-store"
-            response.headers["X-Pratik-Live"] = "CLEAN-V1"
+            response.headers["X-Pratik-Live"] = "CLEAN-V2.3"
     except Exception:
         pass
     return response
@@ -1796,35 +1796,106 @@ def live_data_available(max_ws_age=20.0, max_rest_age=20.0):
     return ws_fresh or rest_fresh
 
 
+def _series_minute_number(label):
+    """Convert HH:MM to minutes after midnight; return None for bad labels."""
+    try:
+        hh, mm = str(label).split(":", 1)
+        return int(hh) * 60 + int(mm)
+    except Exception:
+        return None
+
+
+def _minute_timestamp(minute_no):
+    """Build an IST timestamp for today's requested minute."""
+    n = now_ist()
+    hh, mm = divmod(int(minute_no), 60)
+    return n.replace(hour=hh, minute=mm, second=0, microsecond=0).isoformat()
+
+
+def _carry_forward_to(series, target_minute, include_target=True):
+    """Fill missing market minutes using the last valid OI/CIO observation.
+
+    Carried rows are explicitly tagged so they can never be confused with a
+    fresh Zerodha observation. Nothing is fabricated before the first real row.
+    """
+    if not series:
+        return 0
+
+    last = series[-1]
+    last_m = _series_minute_number(last.get("time"))
+    if last_m is None:
+        return 0
+
+    market_start = MARKET_START_HOUR * 60 + MARKET_START_MINUTE
+    market_end = MARKET_END_HOUR * 60 + MARKET_END_MINUTE
+    target = max(market_start, min(int(target_minute), market_end))
+    stop = target if include_target else target - 1
+    added = 0
+
+    for m in range(last_m + 1, stop + 1):
+        point = dict(last)
+        point["time"] = f"{m // 60:02d}:{m % 60:02d}"
+        point["timestamp"] = _minute_timestamp(m)
+        point["carried_forward"] = True
+        series.append(point)
+        added += 1
+
+    return added
+
+
 def make_snapshot():
-    """Refresh the live in-memory series without doing network/database I/O."""
+    """Maintain minute-complete OIC/CIO series through the full market session.
+
+    Fresh REST/WebSocket data updates the current minute normally. If the feed
+    is temporarily stale, the last valid OIC/CIO observation is carried forward
+    so chart/history minutes do not disappear. Strategy evaluation still runs
+    ONLY on fresh market data.
+    """
     global last_snapshot_ts
 
-    if not live_data_available():
-        return
+    fresh = live_data_available()
+    n = now_ist()
+    current_m = n.hour * 60 + n.minute
 
     with lock:
-        snapshot_current_nifty_candle()
+        # NIFTY remains based on genuine received prices only.
+        if fresh:
+            snapshot_current_nifty_candle()
 
         for key in ("atm", "minus100", "plus100"):
-            point = oic_point(key)
-            if point:
-                append_or_replace_minute(state["series"][key], point)
+            series = state["series"][key]
+            if fresh:
+                # Backfill only genuinely missing minutes before the current one.
+                _carry_forward_to(series, current_m, include_target=False)
+                point = oic_point(key)
+                if point:
+                    point["carried_forward"] = False
+                    append_or_replace_minute(series, point)
+            else:
+                # During a temporary feed gap, preserve continuity with the
+                # last known valid value rather than dropping the minute.
+                _carry_forward_to(series, current_m, include_target=True)
 
-        if baseline_ready:
+        cio_series = state["series"]["cio"]
+        if fresh and baseline_ready:
+            _carry_forward_to(cio_series, current_m, include_target=False)
             ce, pe = cio_totals()
             point = {
                 "time": minute_label(),
-                "timestamp": now_ist().isoformat(),
+                "timestamp": n.isoformat(),
                 "ce": int(ce),
                 "pe": int(pe),
+                "carried_forward": False,
             }
-            append_or_replace_minute(state["series"]["cio"], point)
+            append_or_replace_minute(cio_series, point)
+        elif not fresh:
+            _carry_forward_to(cio_series, current_m, include_target=True)
 
-        # Engine itself has a one-evaluation-per-minute guard.
-        evaluate_live_strategies()
+        # Never create/exit strategy trades from carried-forward stale OI.
+        if fresh:
+            evaluate_live_strategies()
+            state["last_update"] = n.isoformat()
 
-        state["last_update"] = now_ist().isoformat()
         last_snapshot_ts = time.time()
 
 
@@ -1843,7 +1914,7 @@ def snapshot_worker():
     while True:
         started = time.time()
         try:
-            if live_data_available() and is_market_session():
+            if is_market_session():
                 make_snapshot()
         except Exception as e:
             print(f"[DIAG] Snapshot ERROR: {e}", flush=True)
