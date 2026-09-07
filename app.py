@@ -196,6 +196,9 @@ last_rest_quote_ist = None
 rest_quote_errors = 0
 live_start_mutex = threading.Lock()
 snapshot_thread_started = False
+persistence_thread_started = False
+last_snapshot_ts = 0.0
+last_persist_ist = None
 PROCESS_START_TS = time.time()
 
 latest_nifty = {}
@@ -1693,96 +1696,104 @@ def live_data_available(max_ws_age=20.0, max_rest_age=20.0):
 
 
 def make_snapshot():
-    # Stage 7I: snapshot from actual data freshness, not a stale socket flag.
+    """Refresh the live in-memory series without doing network/database I/O."""
+    global last_snapshot_ts
+
     if not live_data_available():
         return
 
     with lock:
-        # Persist the true 1-minute NIFTY OHLC candle assembled from ticks.
-        # ``price`` remains an alias of ``close`` so the current frontend
-        # continues to work without any HTML/JavaScript change.
         snapshot_current_nifty_candle()
         snapshot_current_premium_candles()
 
-        for key in (
-            "atm",
-            "minus100",
-            "plus100",
-        ):
+        for key in ("atm", "minus100", "plus100"):
             point = oic_point(key)
-
             if point:
-                append_or_replace_minute(
-                    state["series"][key],
-                    point,
-                )
+                append_or_replace_minute(state["series"][key], point)
 
         if baseline_ready:
             ce, pe = cio_totals()
-
             point = {
                 "time": minute_label(),
                 "timestamp": now_ist().isoformat(),
                 "ce": int(ce),
                 "pe": int(pe),
             }
+            append_or_replace_minute(state["series"]["cio"], point)
 
-            append_or_replace_minute(
-                state["series"]["cio"],
-                point,
-            )
-
-        # Generate live S1/S2/PNA entries/exits from the same minute snapshot.
+        # Engine itself has a one-evaluation-per-minute guard.
         evaluate_live_strategies()
 
-        state["last_update"] = (
-            now_ist().isoformat()
-        )
-
-    save_current_history()
+        state["last_update"] = now_ist().isoformat()
+        last_snapshot_ts = time.time()
 
 
 def snapshot_worker():
-    print(
-        "[DIAG] Snapshot worker started",
-        flush=True,
-    )
+    """
+    Stage 7J:
+    Keep browser-facing live state fresh independently of Neon/local persistence.
+
+    The old worker called save_current_history() synchronously. A slow DB write
+    could therefore block the *only* snapshot loop and make charts appear frozen
+    even while WebSocket ticks continued to arrive. This worker never performs
+    database/network persistence.
+    """
+    print("[DIAG] Fast snapshot worker started (1s, non-blocking persistence)", flush=True)
 
     while True:
+        started = time.time()
         try:
             if live_data_available() and is_market_session():
                 make_snapshot()
-
         except Exception as e:
-            print(
-                f"[DIAG] Snapshot ERROR: {e}",
-                flush=True,
-            )
+            print(f"[DIAG] Snapshot ERROR: {e}", flush=True)
 
-        n = now_ist()
+        # Keep the live state near-real-time without busy-spinning on Render free.
+        elapsed = time.time() - started
+        time.sleep(max(0.20, 1.0 - elapsed))
 
-        seconds_to_next = (
-            60 - n.second
-        )
 
-        if seconds_to_next < 2:
-            seconds_to_next = 2
+def persistence_worker():
+    """Persist today's accumulated state once per minute, off the live path."""
+    global last_persist_ist
 
-        time.sleep(seconds_to_next)
+    print("[DIAG] Persistence worker started (60s)", flush=True)
+
+    # Small offset so persistence does not contend exactly on the minute boundary.
+    time.sleep(5)
+
+    while True:
+        started = time.time()
+        try:
+            if is_market_session():
+                save_current_history()
+                last_persist_ist = now_ist().isoformat()
+        except Exception as e:
+            print(f"[DIAG] Persistence ERROR: {e}", flush=True)
+
+        elapsed = time.time() - started
+        time.sleep(max(2.0, 60.0 - elapsed))
 
 
 def ensure_snapshot_worker():
     global snapshot_thread_started
+    global persistence_thread_started
 
-    if snapshot_thread_started:
-        return
+    if not snapshot_thread_started:
+        snapshot_thread_started = True
+        threading.Thread(
+            target=snapshot_worker,
+            daemon=True,
+            name="live-snapshot",
+        ).start()
 
-    snapshot_thread_started = True
-
-    threading.Thread(
-        target=snapshot_worker,
-        daemon=True,
-    ).start()
+    if not persistence_thread_started:
+        persistence_thread_started = True
+        threading.Thread(
+            target=persistence_worker,
+            daemon=True,
+            name="history-persistence",
+        ).start()
 
 
 # ============================================================
@@ -3505,12 +3516,15 @@ def health():
             "socket_flag": bool(state.get("connected")),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "7I-tick-authoritative-hybrid",
+            "feed_architecture": "7J-nonblocking-live-snapshot",
+            "snapshot_source": "fresh-tick-or-rest",
+            "last_snapshot_age_sec": round(time.time() - last_snapshot_ts, 1) if last_snapshot_ts else None,
+            "last_persist_ist": last_persist_ist,
             "snapshot_source": "fresh-tick-or-rest",
             "rest_fallback_active": rest_fallback_active,
             "last_rest_quote_ist": last_rest_quote_ist,
             "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "7I-tick-authoritative-snapshot",
+            "reconnect_fix": "7J-nonblocking-snapshot-persistence",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
             "stale_restart_in_progress": stale_restart_in_progress,
