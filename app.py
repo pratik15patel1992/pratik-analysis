@@ -2469,8 +2469,48 @@ def repair_strategy_exit_cutoff():
             trade["exit_reason"] = "14:45 TIME EXIT"
         active = s.get("active")
         if active:
-            # Active positions are handled by the live evaluator from market data only.
-            pass
+            # CLEAN V2.2:
+            # If today's restored strategy is still OPEN after the locked
+            # 14:45 cutoff, close it immediately using only the recorded
+            # NIFTY price at/before 14:45. Never use server/browser time.
+            entry = active.get("entry_level")
+            try:
+                entry = float(entry)
+            except Exception:
+                entry = None
+
+            if entry is not None:
+                points = (
+                    cutoff_price - entry
+                    if active.get("type") == "PE"
+                    else entry - cutoff_price
+                )
+
+                active["exit_time"] = "14:45"
+                active["exit_timestamp"] = None
+                active["exit_level"] = round(cutoff_price, 2)
+                active["points"] = round(points, 2)
+                active["sl_hit"] = False
+                active["result"] = (
+                    "WIN" if points > 0
+                    else ("LOSS" if points < 0 else "FLAT")
+                )
+                active["exit_reason"] = "14:45 TIME EXIT"
+
+                # Move the restored active trade into completed trades.
+                s.setdefault("trades", []).append(dict(active))
+                s["active"] = None
+
+                # Add a matching EXIT marker for chart/report consistency.
+                s.setdefault("signals", []).append({
+                    "time": "14:45",
+                    "timestamp": None,
+                    "strategy": strategy_name,
+                    "action": "EXIT",
+                    "option_type": active.get("type"),
+                    "nifty_level": round(cutoff_price, 2),
+                    "reason": "14:45 TIME EXIT",
+                })
 
 
 init_db()
@@ -3670,7 +3710,7 @@ def health():
             "socket_flag": bool(state.get("connected")),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "CLEAN-V2-EXIT-LOCK",
+            "feed_architecture": "CLEAN-V2.2-EXIT-LOCK",
             "snapshot_source": "fresh-tick-or-rest",
             "feed_start_owner": "startup-or-kite-callback-only",
             "last_snapshot_age_sec": round(time.time() - last_snapshot_ts, 1) if last_snapshot_ts else None,
@@ -3679,7 +3719,7 @@ def health():
             "rest_fallback_active": rest_fallback_active,
             "last_rest_quote_ist": last_rest_quote_ist,
             "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "CLEAN-V2-MARKET-TIME-ONLY",
+            "reconnect_fix": "CLEAN-V2.2-CLOSE-RESTORED-OPEN",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
             "stale_restart_in_progress": stale_restart_in_progress,
