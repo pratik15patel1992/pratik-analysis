@@ -175,6 +175,14 @@ prev_oi = {}
 
 baseline_ready = False
 baseline_thread_started = False
+
+# Stage 7C: server-side Kite watchdog.  Render free instances can restart or
+# temporarily lose the WebSocket even though today's access token is still
+# valid in Neon.  The watchdog reconnects without requiring the browser.
+reconnect_watchdog_started = False
+reconnect_in_progress = False
+last_reconnect_attempt = 0.0
+live_start_mutex = threading.Lock()
 snapshot_thread_started = False
 
 latest_nifty = {}
@@ -2022,28 +2030,43 @@ def start_live(access_token):
     global ticker
     global baseline_ready
 
-    print(
-        "[DIAG] start_live() called",
-        flush=True,
-    )
-
-    with lock:
-        state["date"] = today_key()
-        state["message"] = (
-            "Starting Zerodha live feed..."
+    # Prevent the index route, startup restore and watchdog from creating
+    # competing KiteTicker instances at the same time.
+    with live_start_mutex:
+        print(
+            "[DIAG] start_live() called",
+            flush=True,
         )
 
-    kite = KiteConnect(
-        api_key=KITE_API_KEY
-    )
+        with lock:
+            state["date"] = today_key()
+            state["message"] = (
+                "Starting Zerodha live feed..."
+            )
 
-    kite.set_access_token(
-        access_token
-    )
+        # Dispose of a stale ticker object before creating a fresh one.
+        old_ticker = ticker
+        ticker = None
+        if old_ticker is not None:
+            try:
+                old_ticker.close()
+            except Exception:
+                pass
 
-    kite.profile()
+        kite = KiteConnect(
+            api_key=KITE_API_KEY
+        )
 
-    discover_instruments(kite)
+        kite.set_access_token(
+            access_token
+        )
+
+        # Synchronous API validation.  If the saved daily token is invalid,
+        # this raises immediately; transient WebSocket failures are handled
+        # separately by the watchdog and do not erase the token.
+        kite.profile()
+
+        discover_instruments(kite)
 
     # Rebuild the three locked OIC + six premium mappings immediately.
     # The fail-safe also reconstructs opening ATM from the live NIFTY quote
@@ -2073,6 +2096,69 @@ def start_live(access_token):
     )
 
     ensure_snapshot_worker()
+    ensure_reconnect_watchdog()
+
+
+def reconnect_watchdog():
+    """Keep the server-side Kite stream alive during the market session.
+
+    This is intentionally independent of the browser.  It uses the access
+    token already persisted for today in Neon and retries a disconnected
+    stream at a conservative interval.
+    """
+    global reconnect_in_progress
+    global last_reconnect_attempt
+
+    print("[KITE] Reconnect watchdog started", flush=True)
+
+    while True:
+        try:
+            if is_market_session() and not state.get("connected"):
+                now_ts = time.time()
+                if (
+                    not reconnect_in_progress
+                    and now_ts - last_reconnect_attempt >= 15
+                ):
+                    token = load_access_token()
+                    if token:
+                        reconnect_in_progress = True
+                        last_reconnect_attempt = now_ts
+                        try:
+                            print(
+                                "[KITE] Feed disconnected; attempting automatic reconnect...",
+                                flush=True,
+                            )
+                            start_live(token)
+                        except Exception as e:
+                            # Do not delete today's token for a transient
+                            # WebSocket/network failure.  A genuinely invalid
+                            # token will keep failing profile() and can be
+                            # replaced by the normal Zerodha login flow.
+                            print(
+                                f"[KITE] Automatic reconnect failed: {e}",
+                                flush=True,
+                            )
+                            with lock:
+                                state["connected"] = False
+                                state["message"] = "Reconnecting Zerodha live feed..."
+                        finally:
+                            reconnect_in_progress = False
+        except Exception as e:
+            print(f"[KITE] Watchdog error: {e}", flush=True)
+
+        time.sleep(5)
+
+
+def ensure_reconnect_watchdog():
+    global reconnect_watchdog_started
+    if reconnect_watchdog_started:
+        return
+    reconnect_watchdog_started = True
+    threading.Thread(
+        target=reconnect_watchdog,
+        daemon=True,
+        name="kite-reconnect-watchdog",
+    ).start()
 
 
 # ============================================================
@@ -2170,6 +2256,8 @@ refresh_history_dates()
 # reconnect to Kite from today's Neon-persisted token without requiring the
 # dashboard to be opened in a browser.
 restore_kite_session()
+ensure_snapshot_worker()
+ensure_reconnect_watchdog()
 
 
 # ============================================================
@@ -3334,6 +3422,9 @@ def health():
                     "connected"
                 )
             ),
+            "feed_message": state.get("message"),
+            "reconnect_watchdog": reconnect_watchdog_started,
+            "reconnect_in_progress": reconnect_in_progress,
             "date": state.get(
                 "date"
             ),
