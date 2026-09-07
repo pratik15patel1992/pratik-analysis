@@ -1262,22 +1262,45 @@ function updatePremiumInsightTables(state){
         const strikeText=strike?`${indianNumber(strike)} (${label})`:label;
         const pctHtml=v=>Number.isFinite(v)?`<span class="${v>=0?'positive':'negative'}">${signed(v,2)}%</span>`:'—';
         summary.push(`<tr><td><b>${strikeText}</b></td><td>${indianNumber(ceLast)}</td><td>${pctHtml(cePct)}</td><td>${indianNumber(peLast)}</td><td>${pctHtml(pePct)}</td></tr>`);
-        // Directional premium pressure:
-        // PE dominance = PE premium rising and/or CE premium falling.
-        // CE dominance = CE premium rising and/or PE premium falling.
-        // This avoids the old absolute-move bug where a larger CE fall could be
-        // incorrectly labelled as CE DOMINANT.
-        const peForce=(Number.isFinite(pePct)?Math.max(pePct,0):0)+(Number.isFinite(cePct)?Math.max(-cePct,0):0);
-        const ceForce=(Number.isFinite(cePct)?Math.max(cePct,0):0)+(Number.isFinite(pePct)?Math.max(-pePct,0):0);
-        const total=peForce+ceForce;
-        const cePressure=total?ceForce/total*100:0, pePressure=total?peForce/total*100:0;
+        // Pressure bars show relative movement magnitude, avoiding artificial 0/100 readings.
+        // Interpretation remains directional: CE falling + PE rising = PE dominant;
+        // CE rising + PE falling = CE dominant.
+        const ceMove=Number.isFinite(cePct)?Math.abs(cePct):0;
+        const peMove=Number.isFinite(pePct)?Math.abs(pePct):0;
+        const total=ceMove+peMove;
+        const cePressure=total?ceMove/total*100:0, pePressure=total?peMove/total*100:0;
         let interp='BALANCED', cls='pressureBalanced';
-        if(total){if(pePressure-cePressure>=10){interp='PE DOMINANT';cls='pressurePE';}else if(cePressure-pePressure>=10){interp='CE DOMINANT';cls='pressureCE';}}
+        if(Number.isFinite(cePct)&&Number.isFinite(pePct)){
+            if(cePct<0 && pePct>0){interp='PE DOMINANT';cls='pressurePE';}
+            else if(cePct>0 && pePct<0){interp='CE DOMINANT';cls='pressureCE';}
+            else if(pePressure-cePressure>=10){interp='PE DOMINANT';cls='pressurePE';}
+            else if(cePressure-pePressure>=10){interp='CE DOMINANT';cls='pressureCE';}
+        }
         const bar=(v,t)=>`<div class="pressureTrack"><div class="pressureBar"><div class="pressureFill ${t}" style="width:${v.toFixed(1)}%"></div></div><b>${v.toFixed(0)}%</b></div>`;
         pressure.push(`<tr><td><b>${strikeText}</b></td><td>${total?bar(cePressure,'ce'):'—'}</td><td>${total?bar(pePressure,'pe'):'—'}</td><td class="${cls}">${total?interp:'—'}</td></tr>`);
     }
     const s=document.getElementById('miPremiumSummaryRows'), p=document.getElementById('miPremiumPressureRows');
     if(s) s.innerHTML=summary.join(''); if(p) p.innerHTML=pressure.join('');
+}
+
+function updateOverallMarketState(state){
+    const el=document.getElementById("miMarketState"); if(!el) return;
+    const metrics=state?.strategy_engine?.metrics||{};
+    const master=Number(metrics.master_d);
+    const cioDir=metrics.cio_direction;
+    if(!Number.isFinite(master)){
+        el.textContent="WAITING FOR DATA"; el.className="miState yellow"; return;
+    }
+    // MasterD sign follows the strategy engine: negative = PE/bullish flow, positive = CE/bearish flow.
+    // CIO contradiction de-rates one state toward Sideways rather than fabricating conviction.
+    let score=-master;
+    let label=score>=35?'BULLISH':score>=15?'MILD BULL':score>-15?'SIDEWAYS':score>-35?'MILD BEAR':'BEARISH';
+    const expected=score>0?'PE':score<0?'CE':null;
+    if(expected && cioDir && cioDir!==expected){
+        label=label==='BULLISH'?'MILD BULL':label==='MILD BULL'?'SIDEWAYS':label==='BEARISH'?'MILD BEAR':label==='MILD BEAR'?'SIDEWAYS':label;
+    }
+    el.textContent=label;
+    el.className='miState '+(label==='BULLISH'||label==='MILD BULL'?'positive':label==='BEARISH'||label==='MILD BEAR'?'negative':'yellow');
 }
 
 function updateMarketPage(state){
@@ -1296,6 +1319,7 @@ function updateMarketPage(state){
     document.getElementById("miRecorder").textContent=`${active} / 6`;
     document.getElementById("miRecorderMeta").textContent=active?`${totalPoints} premium minute candle records available across contracts`:`Waiting for option ticks`;
     updatePremiumInsightTables(state);
+    updateOverallMarketState(state);
 }
 
 function setPremiumInterval(id,minutes,btn){
