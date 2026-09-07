@@ -1679,8 +1679,22 @@ def evaluate_live_strategies():
         if pna_count >= 3 and not state["strategies"]["PNA"].get("active"):
             _enter_strategy("PNA", direction, p, f"{votes}/3 + MasterD {metrics['master_d']:+.1f} + CIO, 3 readings", metrics)
 
+def live_data_available(max_ws_age=20.0, max_rest_age=20.0):
+    """True when real market data has actually arrived recently.
+
+    Stage 7I deliberately does NOT trust the WebSocket connected flag alone.
+    The Render logs proved ticks can keep arriving after an unclean-close
+    callback has set state["connected"] to False.
+    """
+    now_ts = time.time()
+    ws_fresh = bool(last_live_tick_ts and (now_ts - last_live_tick_ts) <= max_ws_age)
+    rest_fresh = bool(last_rest_quote_ts and (now_ts - last_rest_quote_ts) <= max_rest_age)
+    return ws_fresh or rest_fresh
+
+
 def make_snapshot():
-    if not (state.get("connected") or rest_fallback_active):
+    # Stage 7I: snapshot from actual data freshness, not a stale socket flag.
+    if not live_data_available():
         return
 
     with lock:
@@ -1736,10 +1750,7 @@ def snapshot_worker():
 
     while True:
         try:
-            if (
-                (state.get("connected") or rest_fallback_active)
-                and is_market_session()
-            ):
+            if live_data_available() and is_market_session():
                 make_snapshot()
 
         except Exception as e:
@@ -1788,10 +1799,18 @@ def on_ticks(ws, ticks):
     global last_live_tick_ts
     global last_live_tick_ist
 
-    # Any received packet proves the stream is alive.
+    # Stage 7I: actual received ticks are the authoritative health signal.
+    # Native KiteTicker reconnect can resume tick delivery after an unclean
+    # close even when a prior close callback left state["connected"] = False.
+    # If ticks are arriving, the feed is live and snapshotting must continue.
     last_live_tick_ts = time.time()
     last_live_tick_ist = now_ist().isoformat()
     tick_counter += len(ticks)
+
+    with lock:
+        state["connected"] = True
+        state["message"] = "LIVE — Zerodha ticks active"
+        state["last_update"] = last_live_tick_ist
 
     option_oi_in_batch = 0
 
@@ -3482,18 +3501,16 @@ def health():
     return jsonify(
         {
             "ok": True,
-            "connected": bool(
-                state.get(
-                    "connected"
-                )
-            ),
+            "connected": live_data_available(),
+            "socket_flag": bool(state.get("connected")),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "7H-hybrid-websocket-rest-backup",
+            "feed_architecture": "7I-tick-authoritative-hybrid",
+            "snapshot_source": "fresh-tick-or-rest",
             "rest_fallback_active": rest_fallback_active,
             "last_rest_quote_ist": last_rest_quote_ist,
             "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "7G-native-plus-stale-restart",
+            "reconnect_fix": "7I-tick-authoritative-snapshot",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
             "stale_restart_in_progress": stale_restart_in_progress,
