@@ -759,7 +759,7 @@
                 <table class="miTable"><thead><tr><th>Strike</th><th>CE LTP</th><th>CE %</th><th>PE LTP</th><th>PE %</th></tr></thead><tbody id="miPremiumSummaryRows"><tr><td colspan="5">Waiting for premium data</td></tr></tbody></table>
             </div>
             <div class="card">
-                <div class="chartHeader"><div><h3>CE vs PE PREMIUM PRESSURE</h3><p>Current • relative absolute premium movement at each locked strike</p></div></div>
+                <div class="chartHeader"><div><h3>CE vs PE PREMIUM PRESSURE</h3><p>Current • directional CE/PE premium movement at each locked strike</p></div></div>
                 <table class="miTable"><thead><tr><th>Strike</th><th>CE</th><th>PE</th><th>Interpretation</th></tr></thead><tbody id="miPremiumPressureRows"><tr><td colspan="4">Waiting for premium data</td></tr></tbody></table>
             </div>
         </section>
@@ -1262,8 +1262,15 @@ function updatePremiumInsightTables(state){
         const strikeText=strike?`${indianNumber(strike)} (${label})`:label;
         const pctHtml=v=>Number.isFinite(v)?`<span class="${v>=0?'positive':'negative'}">${signed(v,2)}%</span>`:'—';
         summary.push(`<tr><td><b>${strikeText}</b></td><td>${indianNumber(ceLast)}</td><td>${pctHtml(cePct)}</td><td>${indianNumber(peLast)}</td><td>${pctHtml(pePct)}</td></tr>`);
-        const ceMove=Number.isFinite(cePct)?Math.abs(cePct):0, peMove=Number.isFinite(pePct)?Math.abs(pePct):0, total=ceMove+peMove;
-        const cePressure=total?ceMove/total*100:0, pePressure=total?peMove/total*100:0;
+        // Directional premium pressure:
+        // PE dominance = PE premium rising and/or CE premium falling.
+        // CE dominance = CE premium rising and/or PE premium falling.
+        // This avoids the old absolute-move bug where a larger CE fall could be
+        // incorrectly labelled as CE DOMINANT.
+        const peForce=(Number.isFinite(pePct)?Math.max(pePct,0):0)+(Number.isFinite(cePct)?Math.max(-cePct,0):0);
+        const ceForce=(Number.isFinite(cePct)?Math.max(cePct,0):0)+(Number.isFinite(pePct)?Math.max(-pePct,0):0);
+        const total=peForce+ceForce;
+        const cePressure=total?ceForce/total*100:0, pePressure=total?peForce/total*100:0;
         let interp='BALANCED', cls='pressureBalanced';
         if(total){if(pePressure-cePressure>=10){interp='PE DOMINANT';cls='pressurePE';}else if(cePressure-pePressure>=10){interp='CE DOMINANT';cls='pressureCE';}}
         const bar=(v,t)=>`<div class="pressureTrack"><div class="pressureBar"><div class="pressureFill ${t}" style="width:${v.toFixed(1)}%"></div></div><b>${v.toFixed(0)}%</b></div>`;
@@ -1853,7 +1860,7 @@ function ensurePremiumInsightPanels(){
                 <table class="miTable"><thead><tr><th>Strike</th><th>CE LTP</th><th>CE %</th><th>PE LTP</th><th>PE %</th></tr></thead><tbody id="miPremiumSummaryRows"><tr><td colspan="5">Waiting for premium data</td></tr></tbody></table>
             </div>
             <div class="card">
-                <div class="chartHeader"><div><h3>CE vs PE PREMIUM PRESSURE</h3><p>Current • relative absolute premium movement at each locked strike</p></div></div>
+                <div class="chartHeader"><div><h3>CE vs PE PREMIUM PRESSURE</h3><p>Current • directional CE/PE premium movement at each locked strike</p></div></div>
                 <table class="miTable"><thead><tr><th>Strike</th><th>CE</th><th>PE</th><th>Interpretation</th></tr></thead><tbody id="miPremiumPressureRows"><tr><td colspan="4">Waiting for premium data</td></tr></tbody></table>
             </div>`;
         grid.parentNode.insertBefore(insights, grid);
