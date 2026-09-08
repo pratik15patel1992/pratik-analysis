@@ -485,6 +485,55 @@
         .zoomHint{font-size:10px;color:var(--muted);margin-top:4px}
         @media(max-width:1200px){.miTop{grid-template-columns:1fr 1fr 1fr}.miPremiumGrid{grid-template-columns:1fr 1fr}}
         @media(max-width:800px){.miTop,.miPremiumGrid,.miFoot,.miInsightGrid{grid-template-columns:1fr}.premiumBox{height:260px}}
+    
+        /* =========================================================
+           SIMPLIFIED EXISTING SYSTEM
+           Keep only:
+           - 4 OI charts
+           - S1 / S2 / PNA strategy tables
+           - NIFTY + OIC + CIO Excel download
+           ========================================================= */
+
+        /* Remove old navigation and all extra dashboard sections */
+        .pageTabs,
+        .topGrid,
+        #pageMarket,
+        #pageReports,
+        #pageNifty .niftyHeader,
+        #pageNifty .toolbar,
+        #pageNifty .niftyChartCard,
+        #pageNifty .notice,
+        #pageOic .notice {
+            display:none !important;
+        }
+
+        /* Keep OIC page and Strategy table page visible together */
+        #pageOic,
+        #pageNifty {
+            display:block !important;
+        }
+
+        /* Keep ONLY the first download card: NIFTY + OIC + CIO Excel */
+        #pageOic .footerGrid {
+            display:grid !important;
+            grid-template-columns:1fr !important;
+        }
+
+        #pageOic .footerGrid > .card:nth-child(2) {
+            display:none !important;
+        }
+
+        /* Strategy tables directly below the 4 charts */
+        #pageNifty .strategyGrid {
+            display:grid !important;
+            margin-top:10px !important;
+        }
+
+        /* Slightly cleaner compact layout */
+        .charts {
+            margin-bottom:10px;
+        }
+
     </style>
 </head>
 
