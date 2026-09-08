@@ -211,6 +211,11 @@ rest_backup_started = False
 rest_fallback_active = False
 last_rest_quote_ts = 0.0
 last_rest_quote_ist = None
+# Timestamp of the most recent REST response that actually contained OI for
+# at least one of the three locked OIC strikes. Spot/VIX freshness alone must
+# never be allowed to make the OIC charts look live.
+last_oic_quote_ts = 0.0
+last_oic_quote_ist = None
 rest_quote_errors = 0
 
 # CLEAN V2.6: one single owner for every Zerodha REST quote request.
@@ -1791,16 +1796,28 @@ def evaluate_live_strategies():
             _enter_strategy("PNA", direction, p, f"{votes}/3 + MasterD {metrics['master_d']:+.1f} + CIO, 3 readings", metrics)
 
 def live_data_available(max_ws_age=20.0, max_rest_age=20.0):
-    """True when real market data has actually arrived recently.
+    """True when any real market data has arrived recently.
 
-    Stage 7I deliberately does NOT trust the WebSocket connected flag alone.
-    The Render logs proved ticks can keep arriving after an unclean-close
-    callback has set state["connected"] to False.
+    This is suitable for spot/NIFTY freshness, but OIC chart freshness is
+    intentionally checked separately by ``oic_data_available`` below.
     """
     now_ts = time.time()
     ws_fresh = bool(last_live_tick_ts and (now_ts - last_live_tick_ts) <= max_ws_age)
     rest_fresh = bool(last_rest_quote_ts and (now_ts - last_rest_quote_ts) <= max_rest_age)
     return ws_fresh or rest_fresh
+
+
+def oic_data_available(max_age=20.0):
+    """True only when the locked OIC option legs have received recent OI.
+
+    A successful REST response for NIFTY/VIX is not enough. Previously that
+    advanced ``last_update`` and marked the feed LIVE even when the locked CE/PE
+    OI legs stopped updating; ``oic_point`` then returned None and the charts
+    silently froze.
+    """
+    if not last_oic_quote_ts:
+        return False
+    return (time.time() - last_oic_quote_ts) <= max_age
 
 
 def _series_minute_number(label):
@@ -1860,31 +1877,37 @@ def make_snapshot():
     """
     global last_snapshot_ts
 
-    fresh = live_data_available()
+    market_fresh = live_data_available()
+    oic_fresh = oic_data_available()
     n = now_ist()
     current_m = n.hour * 60 + n.minute
 
     with lock:
         # NIFTY remains based on genuine received prices only.
-        if fresh:
+        if market_fresh:
             snapshot_current_nifty_candle()
 
         for key in ("atm", "minus100", "plus100"):
             series = state["series"][key]
-            if fresh:
+            if oic_fresh:
                 # Backfill only genuinely missing minutes before the current one.
                 _carry_forward_to(series, current_m, include_target=False)
                 point = oic_point(key)
                 if point:
                     point["carried_forward"] = False
                     append_or_replace_minute(series, point)
+                else:
+                    # Defensive fallback: if one locked CE/PE leg is missing from
+                    # the latest quote payload, keep the minute grid moving rather
+                    # than silently freezing the chart.
+                    _carry_forward_to(series, current_m, include_target=True)
             else:
-                # During a temporary feed gap, preserve continuity with the
+                # During a temporary OI feed gap, preserve continuity with the
                 # last known valid value rather than dropping the minute.
                 _carry_forward_to(series, current_m, include_target=True)
 
         cio_series = state["series"]["cio"]
-        if fresh and baseline_ready:
+        if oic_fresh and baseline_ready:
             _carry_forward_to(cio_series, current_m, include_target=False)
             ce, pe = cio_totals()
             point = {
@@ -1895,13 +1918,21 @@ def make_snapshot():
                 "carried_forward": False,
             }
             append_or_replace_minute(cio_series, point)
-        elif not fresh:
+        else:
             _carry_forward_to(cio_series, current_m, include_target=True)
 
         # Never create/exit strategy trades from carried-forward stale OI.
-        if fresh:
+        if oic_fresh:
             evaluate_live_strategies()
-            state["last_update"] = n.isoformat()
+
+        # Expose separate health so the browser can distinguish 'server/spot
+        # alive' from 'locked OI is genuinely moving'.
+        state["feed_health"] = {
+            "market_fresh": bool(market_fresh),
+            "oic_fresh": bool(oic_fresh),
+            "last_rest_quote": last_rest_quote_ist,
+            "last_oic_quote": last_oic_quote_ist,
+        }
 
         last_snapshot_ts = time.time()
 
@@ -2384,7 +2415,15 @@ def _rest_quote_symbols():
 def _apply_rest_quotes(quotes):
     """Apply REST Quote payload without pretending it was a WebSocket tick."""
     global latest_nifty, latest_vix, last_rest_quote_ts, last_rest_quote_ist
+    global last_oic_quote_ts, last_oic_quote_ist
     option_updates = 0
+    oic_updated_tokens = set()
+    locked_oic_tokens = {
+        int(tok)
+        for legs in oic_tokens.values()
+        for tok in (legs or {}).values()
+        if tok is not None
+    }
     for key, q in (quotes or {}).items():
         token = int(q.get("instrument_token") or 0)
         if token == nifty_token or key == "NSE:NIFTY 50":
@@ -2412,13 +2451,28 @@ def _apply_rest_quotes(quotes):
             if oi is not None:
                 latest_oi[token] = int(oi)
                 option_updates += 1
+                if token in locked_oic_tokens:
+                    oic_updated_tokens.add(token)
             if token in premium_token_map and q.get("last_price") is not None:
                 update_premium_lightweight(token, q.get("last_price"), oi)
+
     last_rest_quote_ts = time.time()
     last_rest_quote_ist = now_ist().isoformat()
+
+    # Only mark OIC fresh when the REST payload actually contained OI for all
+    # currently locked CE/PE legs. This prevents spot/VIX-only responses from
+    # advancing the green LIVE timestamp while OIC charts are frozen.
+    if locked_oic_tokens and locked_oic_tokens.issubset(oic_updated_tokens):
+        last_oic_quote_ts = last_rest_quote_ts
+        last_oic_quote_ist = last_rest_quote_ist
+
     with lock:
         state["last_update"] = last_rest_quote_ist
-        state["message"] = "LIVE — Zerodha REST backup"
+        if locked_oic_tokens and locked_oic_tokens.issubset(oic_updated_tokens):
+            state["message"] = "LIVE — Zerodha REST primary"
+        else:
+            missing = len(locked_oic_tokens - oic_updated_tokens) if locked_oic_tokens else 0
+            state["message"] = f"LIVE spot — OI waiting ({missing} locked legs missing)"
     return option_updates
 
 def poll_rest_market(force=False):
