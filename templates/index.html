@@ -13,15 +13,15 @@
 .header,.toolbar,.card,.chartCard,.strategyCard{background:var(--panel);border:1px solid var(--border);border-radius:14px}
 .header{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:12px 14px;margin-bottom:10px}.brand{font-size:24px;font-weight:800}.brand span{color:var(--ce)}.sub{font-size:11px;color:var(--muted);margin-top:3px}
 .status{padding:8px 10px;background:var(--panel2);border:1px solid var(--border);border-radius:10px}.status b{color:var(--green);font-size:12px}.status small{display:block;color:var(--muted);font-size:10px;margin-top:2px}
-button,a{font:inherit;cursor:pointer;color:var(--text);background:var(--panel2);border:1px solid var(--border);border-radius:9px;padding:7px 10px;text-decoration:none}.login{color:var(--green)}
-.toolbar{padding:8px 10px;margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.toolbar span{font-size:12px;color:var(--muted)}
+button,a,input{font:inherit;cursor:pointer;color:var(--text);background:var(--panel2);border:1px solid var(--border);border-radius:9px;padding:7px 10px;text-decoration:none}.login{color:var(--green)}
+.toolbar{padding:8px 10px;margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.toolbar span{font-size:12px;color:var(--muted)}.toolbar .spacer{flex:1}.dateBox{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.dateBox label{font-size:11px;color:var(--muted)}.dateBox input{padding:6px 8px;font-size:11px}.dateBox button{padding:6px 9px;font-size:11px}.dateBox .liveBtn{color:var(--green);font-weight:700}
 .charts{display:grid;grid-template-columns:1fr 1fr;gap:10px}.chartCard{padding:11px;min-height:320px}.head{display:flex;justify-content:space-between;gap:10px;margin-bottom:6px}.head h3{margin:0;font-size:15px}.head p{margin:3px 0 0;color:var(--muted);font-size:10px}.controls{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.controls button{padding:4px 7px;font-size:10px}.controls .active{background:var(--purple);border-color:var(--purple)}
 .chartBox{height:245px}.stats{font-size:10px;color:var(--muted);margin-top:6px;display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap}
 .strategyGrid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px}.strategyCard{padding:12px}.strategyCard h3{margin:0 0 4px}.mini{font-size:10px;color:var(--muted);margin-bottom:7px}
 table{width:100%;border-collapse:collapse;font-size:11px}th,td{padding:6px;border-bottom:1px solid var(--border);text-align:left}th{color:var(--muted);text-transform:uppercase;font-size:10px}.positive{color:var(--green)}.negative{color:var(--red)}
 .download{margin-top:10px;padding:12px;display:flex;justify-content:space-between;align-items:center;gap:12px}.download h3{margin:0 0 3px;font-size:15px}.download p{margin:0;color:var(--muted);font-size:10px}.download button{color:var(--green);font-weight:800;border-color:rgba(68,223,141,.5)}
 .full{position:fixed!important;inset:8px;z-index:9999;background:var(--panel)}.full .chartBox{height:calc(100vh - 90px)}
-@media(max-width:1000px){.charts,.strategyGrid{grid-template-columns:1fr}}@media(max-width:650px){.header,.download{align-items:flex-start;flex-direction:column}}
+@media(max-width:1000px){.charts,.strategyGrid{grid-template-columns:1fr}}@media(max-width:650px){.header,.download{align-items:flex-start;flex-direction:column}.toolbar .spacer{display:none}}
 </style>
 </head>
 <body>
@@ -34,7 +34,16 @@ table{width:100%;border-collapse:collapse;font-size:11px}th,td{padding:6px;borde
     </div>
   </div>
 
-  <div class="toolbar"><span id="atmText">Opening ATM: —</span><span id="expiryText">Expiry: —</span></div>
+  <div class="toolbar">
+    <span id="atmText">Opening ATM: —</span><span id="expiryText">Expiry: —</span>
+    <div class="spacer"></div>
+    <div class="dateBox">
+      <label for="historyDate">Trading Date</label>
+      <input type="date" id="historyDate">
+      <button onclick="loadSelectedDate()">Load Date</button>
+      <button class="liveBtn" onclick="liveToday()">Live Today</button>
+    </div>
+  </div>
 
   <div class="charts">
     <article class="chartCard" id="card-atm"><div class="head"><div><h3 id="title-atm">ATM OI</h3><p>CE OI vs PE OI</p></div><div class="controls"><button onclick="full('card-atm')">Full</button><button onclick="reset('atm')">Reset</button><button class="active" data-g="atm" onclick="tf('atm',1,this)">1m</button><button data-g="atm" onclick="tf('atm',3,this)">3m</button><button data-g="atm" onclick="tf('atm',5,this)">5m</button><button data-g="atm" onclick="tf('atm',15,this)">15m</button></div></div><div class="chartBox"><canvas id="chart-atm"></canvas></div><div class="stats" id="stats-atm"></div></article>
@@ -49,23 +58,28 @@ table{width:100%;border-collapse:collapse;font-size:11px}th,td{padding:6px;borde
     <div class="strategyCard"><h3>PNA Strategy</h3><div class="mini">30-point hard SL</div><table><thead><tr><th>Entry</th><th>Level</th><th>Exit</th><th>Points</th></tr></thead><tbody id="pna"></tbody></table></div>
   </div>
 
-  <div class="card download"><div><h3>Download NIFTY + OIC + CIO Data (Excel)</h3><p>Current session minute-wise data</p></div><button onclick="location.href='/api/download/cio'">Download Excel</button></div>
+  <div class="card download"><div><h3>Download NIFTY + OIC + CIO Data (Excel)</h3><p id="downloadText">Selected-date minute-wise data + NIFTY OHLC + S1/S2/PNA summary</p></div><button onclick="downloadExcel()">Download Excel</button></div>
 </div>
 <script>
 const selected={atm:1,plus100:1,minus100:1,cio:1}, charts={};
+let selectedDate="";
 const fmt=v=>{const n=Number(v);return Number.isFinite(n)?new Intl.NumberFormat("en-IN",{maximumFractionDigits:2}).format(n):"—"};
+function localToday(){const d=new Date();const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,"0"),day=String(d.getDate()).padStart(2,"0");return `${y}-${m}-${day}`}
 function agg(rows,m){if(m<=1)return rows.slice();let out=[],b=null;for(const p of rows){let [h,mm]=String(p.time||"").split(":").map(Number);if(!Number.isFinite(h)||!Number.isFinite(mm))continue;let k=Math.floor((h*60+mm)/m)*m;if(!b||b.k!==k){if(b)out.push(b.p);b={k,p:{...p}}}else b.p={...p}}if(b)out.push(b.p);return out}
 function opts(cio=false){return{responsive:true,maintainAspectRatio:false,animation:false,interaction:{mode:"index",intersect:false},plugins:{legend:{labels:{color:"#8fa9bb",usePointStyle:true,boxWidth:8}},zoom:{pan:{enabled:true,mode:"x"},zoom:{wheel:{enabled:true,speed:.08},pinch:{enabled:true},mode:"x"}}},scales:{x:{ticks:{color:"#8fa9bb",maxTicksLimit:10},grid:{color:"rgba(130,160,180,.18)"}},y:{max:cio?0:undefined,ticks:{color:"#8fa9bb",callback:fmt},grid:{color:"rgba(130,160,180,.18)"}}}}}
 function make(id,cio=false){return new Chart(document.getElementById(id),{type:"line",data:{labels:[],datasets:[{label:cio?"CE Negative Change in OI":"CE OI",data:[],borderColor:"#35c7ff",backgroundColor:"#35c7ff",pointRadius:0,borderWidth:2,tension:.18},{label:cio?"PE Negative Change in OI":"PE OI",data:[],borderColor:"#ff5fa2",backgroundColor:"#ff5fa2",pointRadius:0,borderWidth:2,tension:.18}]},options:opts(cio)})}
 function updateChart(k,s){let raw=Array.isArray(s?.series?.[k])?s.series[k]:[],a=agg(raw,selected[k]),c=charts[k];c.data.labels=a.map(x=>x.time);c.data.datasets[0].data=a.map(x=>Number(x.ce));c.data.datasets[1].data=a.map(x=>Number(x.pe));c.update("none");document.getElementById("stats-"+k).textContent=raw.length?`${raw[0].time} – ${raw.at(-1).time} • ${raw.length} points`:"No data"}
 function signed(v){let n=Number(v);return Number.isFinite(n)?`${n>=0?"+":""}${n.toFixed(2)}`:"—"}
 function table(name,id,s){let st=s?.strategies?.[name]||{},r=[];for(const t of (st.trades||[])){r.push(`<tr><td>${t.entry_time||"—"} SELL ${t.type||""}</td><td>${fmt(t.entry_level)}</td><td>${t.exit_time||"—"}</td><td class="${Number(t.points)>=0?"positive":"negative"}">${signed(t.points)}</td></tr>`)}if(st.active)r.push(`<tr><td>${st.active.entry_time||"—"} SELL ${st.active.type||""}</td><td>${fmt(st.active.entry_level)}</td><td><b>OPEN</b></td><td>SL ${fmt(st.active.sl_level)}</td></tr>`);document.getElementById(id).innerHTML=r.length?r.join(""):`<tr><td colspan="4">No trade yet</td></tr>`}
-function render(s){let a=Number(s.opening_atm);document.getElementById("atmText").textContent=`Opening ATM: ${Number.isFinite(a)?a:"—"}`;document.getElementById("expiryText").textContent=`Expiry: ${s.expiry||"—"}`;if(Number.isFinite(a)){document.getElementById("title-atm").textContent=`ATM OI (${a})`;document.getElementById("title-plus100").textContent=`ATM +100 OI (${a+100})`;document.getElementById("title-minus100").textContent=`ATM -100 OI (${a-100})`}for(const k of ["atm","plus100","minus100","cio"])updateChart(k,s);table("S1","s1",s);table("S2","s2",s);table("PNA","pna",s)}
-async function load(){try{let r=await fetch("/api/state",{cache:"no-store"}),s=await r.json();document.getElementById("status").textContent=s.message||"—";document.getElementById("last").textContent=`Last update: ${s.last_update?new Date(s.last_update).toLocaleTimeString("en-IN"):"—"}`;render(s)}catch(e){document.getElementById("status").textContent="Unable to load state"}}
+function render(s){let a=Number(s.opening_atm);document.getElementById("atmText").textContent=`Opening ATM: ${Number.isFinite(a)?a:"—"}`;document.getElementById("expiryText").textContent=`Expiry: ${s.expiry||"—"}`;if(Number.isFinite(a)){document.getElementById("title-atm").textContent=`ATM OI (${a})`;document.getElementById("title-plus100").textContent=`ATM +100 OI (${a+100})`;document.getElementById("title-minus100").textContent=`ATM -100 OI (${a-100})`}else{document.getElementById("title-atm").textContent="ATM OI";document.getElementById("title-plus100").textContent="ATM +100 OI";document.getElementById("title-minus100").textContent="ATM -100 OI"}for(const k of ["atm","plus100","minus100","cio"])updateChart(k,s);table("S1","s1",s);table("S2","s2",s);table("PNA","pna",s)}
+async function load(){try{let url="/api/state"+(selectedDate?`?date=${encodeURIComponent(selectedDate)}`:"");let r=await fetch(url,{cache:"no-store"}),s=await r.json();document.getElementById("status").textContent=s.message||"—";document.getElementById("last").textContent=`Last update: ${s.last_update?new Date(s.last_update).toLocaleTimeString("en-IN"):"—"}`;if(s.date&&!selectedDate&&s.date!==localToday())document.getElementById("historyDate").value=s.date;render(s)}catch(e){document.getElementById("status").textContent="Unable to load state"}}
+function loadSelectedDate(){const v=document.getElementById("historyDate").value;if(!v)return;selectedDate=(v===localToday())?"":v;load()}
+function liveToday(){selectedDate="";document.getElementById("historyDate").value=localToday();load()}
+function downloadExcel(){const day=selectedDate||document.getElementById("historyDate").value||localToday();location.href=`/api/download/cio?date=${encodeURIComponent(day)}`}
 function tf(k,m,b){selected[k]=m;document.querySelectorAll(`[data-g="${k}"]`).forEach(x=>x.classList.remove("active"));b.classList.add("active");load()}
 function reset(k){if(charts[k]?.resetZoom)charts[k].resetZoom()}
 function full(id){document.getElementById(id).classList.toggle("full");setTimeout(()=>Object.values(charts).forEach(c=>c.resize()),50)}
-charts.atm=make("chart-atm");charts.plus100=make("chart-plus100");charts.minus100=make("chart-minus100");charts.cio=make("chart-cio",true);load();setInterval(load,2000);
+charts.atm=make("chart-atm");charts.plus100=make("chart-plus100");charts.minus100=make("chart-minus100");charts.cio=make("chart-cio",true);document.getElementById("historyDate").max=localToday();document.getElementById("historyDate").value=localToday();load();setInterval(load,2000);
 </script>
 </body>
 </html>
