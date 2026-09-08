@@ -1026,28 +1026,33 @@ def snapshot_for_date(day):
 
 
 @app.route("/api/download/cio")
+@app.route("/api/download/data")
 def download_excel():
-    requested = (request.args.get("date") or today_key()).strip()
+    """Download selected-date NIFTY OHLC + OIC + CIO data.
 
-    # If Zerodha is connected, reconcile OHLC with actual 1-minute candles before export.
-    if kite is not None and db_enabled():
-        backfill_nifty_ohlc(kite, requested)
-        if requested == today_key():
-            hist = load_history(requested)
-            if hist and hist.get("series", {}).get("nifty"):
-                with lock:
-                    # Only refresh NIFTY OHLC rows; OI/CIO/strategy live state remains untouched.
-                    state["series"]["nifty"] = hist["series"]["nifty"]
+    This route intentionally does not make a Zerodha historical API call during
+    the browser download request. That keeps downloads fast and reliable. Any
+    OHLC reconciliation is done separately in the background after Zerodha login.
+    """
+    requested = (request.args.get("date") or today_key()).strip()
+    try:
+        datetime.strptime(requested, "%Y-%m-%d")
+    except ValueError:
+        return jsonify({"error": "Invalid date. Use YYYY-MM-DD."}), 400
 
     s = snapshot_for_date(requested)
     if not s:
         return jsonify({"error": f"No stored data for {requested}"}), 404
 
     def by_time(rows):
-        return {str(r.get("time")): r for r in rows if r.get("time")}
+        return {str(r.get("time")): r for r in (rows or []) if r.get("time")}
 
-    maps = {k: by_time(v) for k, v in s["series"].items()}
+    maps = {k: by_time(v) for k, v in (s.get("series") or {}).items()}
+    for key in ("nifty", "minus100", "atm", "plus100", "cio"):
+        maps.setdefault(key, {})
     all_times = sorted(set().union(*(m.keys() for m in maps.values())))
+    if not all_times:
+        return jsonify({"error": f"No minute data available for {requested}"}), 404
 
     wb = Workbook()
     ws = wb.active
@@ -1056,9 +1061,9 @@ def download_excel():
     ws["A2"] = "NIFTY + OIC + CIO — Minute-wise Data"
     ws["A1"].font = Font(bold=True, size=16)
     ws["A2"].font = Font(bold=True, size=13)
-    ws["A4"] = "Date"; ws["B4"] = s["date"]
-    ws["A5"] = "Opening ATM"; ws["B5"] = s["opening_atm"]
-    ws["A6"] = "Expiry"; ws["B6"] = s["expiry"]
+    ws["A4"] = "Date"; ws["B4"] = s.get("date") or requested
+    ws["A5"] = "Opening ATM"; ws["B5"] = s.get("opening_atm")
+    ws["A6"] = "Expiry"; ws["B6"] = s.get("expiry")
 
     headers = [
         "Time", "NIFTY Open", "NIFTY High", "NIFTY Low", "NIFTY Close",
@@ -1088,29 +1093,58 @@ def download_excel():
 
     ws.freeze_panes = "A9"
     widths = [12, 14, 14, 14, 14, 19, 19, 18, 18, 19, 19, 31, 31]
+    from openpyxl.utils import get_column_letter
     for i, w in enumerate(widths, 1):
-        ws.column_dimensions[chr(64 + i)].width = w
+        ws.column_dimensions[get_column_letter(i)].width = w
 
-    # Strategy summary report sheet
-    ss = wb.create_sheet("S1 S2 PNA Summary")
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name=f"Pratik_NIFTY_OIC_CIO_{requested}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        max_age=0,
+    )
+
+
+@app.route("/api/download/strategy")
+def download_strategy_summary():
+    """Download a separate selected-date S1/S2/PNA strategy summary workbook."""
+    requested = (request.args.get("date") or today_key()).strip()
+    try:
+        datetime.strptime(requested, "%Y-%m-%d")
+    except ValueError:
+        return jsonify({"error": "Invalid date. Use YYYY-MM-DD."}), 400
+
+    s = snapshot_for_date(requested)
+    if not s:
+        return jsonify({"error": f"No stored data for {requested}"}), 404
+
+    wb = Workbook()
+    ss = wb.active
+    ss.title = "S1 S2 PNA Summary"
     ss["A1"] = "Pratik Analysis"
     ss["A2"] = "S1 / S2 / PNA Strategy Summary Report"
     ss["A1"].font = Font(bold=True, size=16)
     ss["A2"].font = Font(bold=True, size=13)
-    ss["A4"] = "Date"; ss["B4"] = s["date"]
+    ss["A4"] = "Date"; ss["B4"] = s.get("date") or requested
+    ss["A5"] = "Opening ATM"; ss["B5"] = s.get("opening_atm")
+    ss["A6"] = "Expiry"; ss["B6"] = s.get("expiry")
 
     summary_headers = ["Strategy", "Total Trades", "Profitable", "Losing", "Total Points"]
     for c, h in enumerate(summary_headers, 1):
-        ss.cell(6, c, h).font = Font(bold=True)
+        ss.cell(8, c, h).font = Font(bold=True)
 
     strategies = s.get("strategies") or {}
-    summary_row = 7
+    summary_row = 9
     all_trade_rows = []
     for name in ("S1", "S2", "PNA"):
         st = strategies.get(name) or {"trades": [], "active": None}
         trades = list(st.get("trades") or [])
-        wins = sum(1 for t in trades if float(t.get("points") or 0) >= 0)
-        losses = sum(1 for t in trades if float(t.get("points") or 0) < 0)
+        wins = sum(1 for t in trades if t.get("points") is not None and float(t.get("points")) >= 0)
+        losses = sum(1 for t in trades if t.get("points") is not None and float(t.get("points")) < 0)
         total_points = round(sum(float(t.get("points") or 0) for t in trades), 2)
         vals = [name, len(trades), wins, losses, total_points]
         for c, v in enumerate(vals, 1):
@@ -1131,7 +1165,7 @@ def download_excel():
                 None, None, "OPEN", None, "OPEN"
             ])
 
-    detail_start = 12
+    detail_start = 14
     detail_headers = [
         "Strategy", "Trade #", "Type", "Entry Time", "Entry NIFTY", "SL Level",
         "Exit Time", "Exit NIFTY", "Exit Reason", "Points", "Result"
@@ -1147,8 +1181,9 @@ def download_excel():
 
     ss.freeze_panes = f"A{detail_start + 1}"
     ss_widths = [14, 10, 10, 14, 16, 16, 14, 16, 30, 12, 12]
+    from openpyxl.utils import get_column_letter
     for i, w in enumerate(ss_widths, 1):
-        ss.column_dimensions[chr(64 + i)].width = w
+        ss.column_dimensions[get_column_letter(i)].width = w
 
     buf = BytesIO()
     wb.save(buf)
@@ -1156,8 +1191,9 @@ def download_excel():
     return send_file(
         buf,
         as_attachment=True,
-        download_name=f"Pratik_NIFTY_OIC_CIO_{s['date']}.xlsx",
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        download_name=f"Pratik_S1_S2_PNA_Summary_{requested}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        max_age=0,
     )
 
 
