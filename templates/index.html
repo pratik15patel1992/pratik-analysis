@@ -1528,9 +1528,15 @@ async function loadLive(){
         const state = await res.json();
         currentState = state;
 
+        // A transient browser/network error used to leave "Failed to fetch"
+        // stuck on screen even after later /api/state calls succeeded.
+        const sessionMessage = document.getElementById("sessionMessage");
+        if(sessionMessage) sessionMessage.textContent = "";
+
         const status = document.getElementById("connectionStatus");
         status.textContent = state.message || (state.connected ? "LIVE — Zerodha connected" : "Disconnected");
-        status.style.color = state.connected ? "var(--green)" : "var(--yellow)";
+        const oicFresh = state?.feed_health?.oic_fresh;
+        status.style.color = (state.connected && oicFresh !== false) ? "var(--green)" : "var(--yellow)";
 
         document.getElementById("lastUpdate").textContent =
             `Last update: ${formatTimeStamp(state.last_update)}`;
