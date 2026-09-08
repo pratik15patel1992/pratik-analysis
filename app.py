@@ -1,4154 +1,605 @@
+
 import os
-import json
 import math
 import time
 import threading
-import hmac
-from pathlib import Path
 from datetime import datetime, timedelta
 from io import BytesIO
 
-from flask import (
-    Flask,
-    render_template,
-    redirect,
-    request,
-    jsonify,
-    send_file,
-    session,
-    url_for,
-)
-
+from flask import Flask, render_template, redirect, request, jsonify, send_file
 from kiteconnect import KiteConnect
-
 from openpyxl import Workbook
-from openpyxl.chart import LineChart, Reference
 from openpyxl.styles import Font, Alignment
-
-import psycopg
-from psycopg.types.json import Jsonb
-
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
 
 APP_SECRET = os.environ.get("APP_SECRET", "change-me")
 KITE_API_KEY = os.environ.get("KITE_API_KEY", "")
 KITE_API_SECRET = os.environ.get("KITE_API_SECRET", "")
-PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
-PORTAL_USERNAME = os.environ.get("PORTAL_USERNAME", "")
-PORTAL_PASSWORD = os.environ.get("PORTAL_PASSWORD", "")
+PORT = int(os.environ.get("PORT", "8000"))
+
+IST_OFFSET = timedelta(hours=5, minutes=30)
+MARKET_START = 9 * 60 + 15
+MARKET_END = 15 * 60 + 30
+STRATEGY_START = 9 * 60 + 30
+STRATEGY_EXIT = 14 * 60 + 45
+HARD_SL = 30.0
+MAX_TRADES = 3
+MASTER_CLEAR = 35.0
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET
-app.config.update(
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=True,
-    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
-)
-
-# Stage 7L:
-# Live JSON endpoints must never be served from browser/proxy cache.
-# The WebSocket callback can be receiving current OI while a cached /api/state
-# or /health response makes the portal look frozen at the process-start snapshot.
-@app.after_request
-def disable_live_api_cache(response):
-    try:
-        path = request.path or ""
-        if path == "/health" or path.startswith("/api/"):
-            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-            response.headers["Pragma"] = "no-cache"
-            response.headers["Expires"] = "0"
-            response.headers["Surrogate-Control"] = "no-store"
-            response.headers["X-Pratik-Live"] = "CLEAN-V2.4"
-    except Exception:
-        pass
-    return response
-
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
-DATA.mkdir(exist_ok=True)
-
-ACCESS_TOKEN_FILE = DATA / "access_token.json"
-BASELINE_FILE = DATA / "oi_baseline.json"
-
-HISTORY_DIR = DATA / "history"
-HISTORY_DIR.mkdir(exist_ok=True)
 
 lock = threading.RLock()
+rest_lock = threading.Lock()
 
-IST_OFFSET = timedelta(hours=5, minutes=30)
-
-MARKET_START_HOUR = 9
-MARKET_START_MINUTE = 15
-MARKET_END_HOUR = 15
-MARKET_END_MINUTE = 30
-
-
-# ============================================================
-# STATE
-# ============================================================
+kite = None
+access_token = None
+nifty_token = None
+option_rows = []
+token_meta = {}
+locked = {}
+latest_oi = {}
+baseline_oi = {}
+baseline_ready = False
+last_poll = 0.0
+worker_started = False
 
 state = {
     "configured": bool(KITE_API_KEY and KITE_API_SECRET),
     "connected": False,
     "message": "Waiting for Zerodha login",
     "last_update": None,
-
     "date": None,
     "expiry": None,
-
-    "nifty": {
-        "price": None,
-        "previous_close": None,
-        "open": None,
-        "high": None,
-        "low": None,
-        "change": None,
-        "change_pct": None,
-    },
-
-    "vix": {
-        "price": None,
-        "range": None,
-        "interpretation": None,
-    },
-
-    "zone": {
-        "quadrant": None,
-        "zone": None,
-        "opening_pct": None,
-        "levels": {},
-    },
-
     "opening_atm": None,
-
-    "oic": {
-        "atm": None,
-        "minus100": None,
-        "plus100": None,
-    },
-
-    # Locked six option contracts used for premium analytics.
-    # Populated once opening ATM is known.
-    "premium": {
-        "atm": None,
-        "minus100": None,
-        "plus100": None,
-    },
-
-    "series": {
-        "nifty": [],
-        "atm": [],
-        "minus100": [],
-        "plus100": [],
-        "cio": [],
-        # True 1-minute option premium OHLC, built from live ticks.
-        # Each strike bucket contains CE and PE candles.
-        "premium": {
-            "minus100": {"CE": [], "PE": []},
-            "atm": {"CE": [], "PE": []},
-            "plus100": {"CE": [], "PE": []},
-        },
-    },
-
-    "history_dates": [],
-
-    # Strategy trade ledger. The live S1/S2/PNA engine will populate
-    # these lists once the exact signal rules are activated.
+    "nifty": {"price": None, "open": None, "high": None, "low": None, "previous_close": None},
+    "series": {"nifty": [], "atm": [], "minus100": [], "plus100": [], "cio": []},
     "strategies": {
-        "S1": {"trades": [], "active": None, "signals": []},
-        "S2": {"trades": [], "active": None, "signals": []},
-        "PNA": {"trades": [], "active": None, "signals": []},
+        "S1": {"trades": [], "active": None},
+        "S2": {"trades": [], "active": None},
+        "PNA": {"trades": [], "active": None},
     },
-    "strategy_engine": {
-        "enabled": True,
-        "version": "LIVE-OIC-CIO-1",
-        "last_eval_minute": None,
-        "metrics": {},
-    },
+    "strategy_engine": {"last_eval_minute": None, "recent": {}},
 }
-
-
-# ============================================================
-# GLOBAL LIVE OBJECTS
-# ============================================================
-
-kite = None
-ticker = None
-
-nifty_token = None
-vix_token = None
-
-option_instruments = []
-token_meta = {}
-oic_tokens = {}
-premium_token_map = {}
-
-latest_oi = {}
-prev_oi = {}
-
-baseline_ready = False
-baseline_thread_started = False
-
-# Stage 7C: server-side Kite watchdog.  Render free instances can restart or
-# temporarily lose the WebSocket even though today's access token is still
-# valid in Neon.  The watchdog reconnects without requiring the browser.
-reconnect_watchdog_started = False
-reconnect_in_progress = False
-last_reconnect_attempt = 0.0
-# Stage 7G: timestamp of the most recent WebSocket tick.  A socket can appear
-# alive while the feed has silently frozen, so health/watchdog must track
-# actual tick freshness rather than connection state alone.
-last_live_tick_ts = 0.0
-last_live_tick_ist = None
-stale_restart_in_progress = False
-# Stage 7H: REST quote backup activates only when WebSocket ticks are stale.
-rest_backup_started = False
-rest_fallback_active = False
-last_rest_quote_ts = 0.0
-last_rest_quote_ist = None
-# Timestamp of the most recent REST response that actually contained OI for
-# at least one of the three locked OIC strikes. Spot/VIX freshness alone must
-# never be allowed to make the OIC charts look live.
-last_oic_quote_ts = 0.0
-last_oic_quote_ist = None
-rest_quote_errors = 0
-
-# CLEAN V2.6: one single owner for every Zerodha REST quote request.
-# Background worker, startup and /api/state all use this same lock/timer,
-# preventing duplicate requests and rate-limit collisions.
-rest_poll_lock = threading.Lock()
-last_rest_attempt_ts = 0.0
-
-live_start_mutex = threading.Lock()
-snapshot_thread_started = False
-persistence_thread_started = False
-last_snapshot_ts = 0.0
-last_persist_ist = None
-PROCESS_START_TS = time.time()
-
-latest_nifty = {}
-latest_vix = {}
-
-# Live 1-minute NIFTY OHLC aggregator. Kite's tick ``ohlc`` field is
-# session/day OHLC, not a 1-minute candle, so we build true minute candles
-# ourselves from the live NIFTY last_price ticks.
-nifty_minute_bucket = None
-
-# Live minute buckets for the six locked option contracts.
-# Keyed by instrument token so CE/PE candles are independently aggregated.
-premium_minute_buckets = {}
-
-tick_counter = 0
-oi_tick_counter = 0
-
-
-# ============================================================
-# TIME
-# ============================================================
 
 def now_ist():
     return datetime.utcnow() + IST_OFFSET
 
-
 def today_key():
     return now_ist().strftime("%Y-%m-%d")
 
+def market_minute():
+    n = now_ist()
+    return n.hour * 60 + n.minute
+
+def is_market():
+    m = market_minute()
+    return MARKET_START <= m <= MARKET_END
 
 def minute_label():
     return now_ist().strftime("%H:%M")
 
-
-def is_market_session():
-    n = now_ist()
-
-    current = n.hour * 60 + n.minute
-    start = MARKET_START_HOUR * 60 + MARKET_START_MINUTE
-    end = MARKET_END_HOUR * 60 + MARKET_END_MINUTE
-
-    return start <= current <= end
-
-
-# ============================================================
-# JSON
-# ============================================================
-
-def safe_json_load(path, default=None):
-    if default is None:
-        default = {}
-
-    try:
-        if path.exists():
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-
-    except Exception as e:
-        print(f"[DIAG] JSON load error: {e}", flush=True)
-
-    return default
-
-
-def safe_json_save(path, data):
-    try:
-        temp = path.with_suffix(path.suffix + ".tmp")
-
-        with open(temp, "w", encoding="utf-8") as f:
-            json.dump(
-                data,
-                f,
-                ensure_ascii=False,
-                indent=2,
-            )
-
-        temp.replace(path)
-
-    except Exception as e:
-        print(f"[DIAG] JSON save error: {e}", flush=True)
-
-
-# ============================================================
-# PERMANENT DATABASE (NEON POSTGRESQL)
-# ============================================================
-
-def db_enabled():
-    return bool(DATABASE_URL)
-
-
-def db_connect():
-    if not DATABASE_URL:
-        return None
-
-    return psycopg.connect(
-        DATABASE_URL,
-        connect_timeout=10,
-    )
-
-
-def init_db():
-    if not db_enabled():
-        print(
-            "[DB] DATABASE_URL not configured; using local history fallback.",
-            flush=True,
-        )
-        return False
-
-    try:
-        with db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS pratik_daily_history (
-                        day DATE PRIMARY KEY,
-                        payload JSONB NOT NULL,
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                    )
-                    """
-                )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS pratik_kite_session (
-                        session_id SMALLINT PRIMARY KEY CHECK (session_id = 1),
-                        token_day DATE NOT NULL,
-                        access_token TEXT NOT NULL,
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                    )
-                    """
-                )
-            conn.commit()
-
-        print(
-            "[DB] Neon history table ready.",
-            flush=True,
-        )
-        return True
-
-    except Exception as e:
-        print(
-            f"[DB] Database initialization failed: {e}",
-            flush=True,
-        )
-        return False
-
-
-def save_history_to_db(day, payload):
-    if not db_enabled():
-        return False
-
-    try:
-        with db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO pratik_daily_history (day, payload, updated_at)
-                    VALUES (%s, %s, NOW())
-                    ON CONFLICT (day)
-                    DO UPDATE SET
-                        payload = EXCLUDED.payload,
-                        updated_at = NOW()
-                    """,
-                    (day, Jsonb(payload)),
-                )
-            conn.commit()
-
-        return True
-
-    except Exception as e:
-        print(
-            f"[DB] History save failed for {day}: {e}",
-            flush=True,
-        )
-        return False
-
-
-def load_history_from_db(day):
-    if not db_enabled():
-        return None
-
-    try:
-        with db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT payload
-                    FROM pratik_daily_history
-                    WHERE day = %s
-                    """,
-                    (day,),
-                )
-                row = cur.fetchone()
-
-        if not row:
-            return None
-
-        payload = row[0]
-
-        if isinstance(payload, str):
-            payload = json.loads(payload)
-
-        return payload
-
-    except Exception as e:
-        print(
-            f"[DB] History load failed for {day}: {e}",
-            flush=True,
-        )
-        return None
-
-
-def db_history_dates():
-    if not db_enabled():
-        return []
-
-    try:
-        with db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT day
-                    FROM pratik_daily_history
-                    ORDER BY day DESC
-                    """
-                )
-                rows = cur.fetchall()
-
-        return [row[0].isoformat() for row in rows]
-
-    except Exception as e:
-        print(
-            f"[DB] History date load failed: {e}",
-            flush=True,
-        )
-        return []
-
-
-def history_exists(day):
-    if load_history_from_db(day) is not None:
-        return True
-
-    return history_file(day).exists()
-
-
-# ============================================================
-# HISTORY
-# ============================================================
-
-def history_file(day):
-    return HISTORY_DIR / f"{day}.json"
-
-
-def load_day_history(day):
-    db_data = load_history_from_db(day)
-
-    if db_data is not None:
-        return db_data
-
-    return safe_json_load(
-        history_file(day),
-        {
-            "date": day,
-            "expiry": None,
-            "opening_atm": None,
-            "nifty": {},
-            "vix": {},
-            "zone": {},
-            "oic": {},
-            "series": {
-                "nifty": [],
-                "atm": [],
-                "minus100": [],
-                "plus100": [],
-                "cio": [],
-                "premium": {
-                    "minus100": {"CE": [], "PE": []},
-                    "atm": {"CE": [], "PE": []},
-                    "plus100": {"CE": [], "PE": []},
-                },
-            },
-            "premium": {
-                "atm": None,
-                "minus100": None,
-                "plus100": None,
-            },
-            "strategies": {
-                "S1": {"trades": [], "active": None, "signals": []},
-                "S2": {"trades": [], "active": None, "signals": []},
-                "PNA": {"trades": [], "active": None, "signals": []},
-            },
-            "strategy_engine": {"enabled": True, "version": "LIVE-OIC-CIO-1", "last_eval_minute": None, "metrics": {}},
-        },
-    )
-
-
-def refresh_history_dates():
-    dates = set(db_history_dates())
-
-    for f in HISTORY_DIR.glob("*.json"):
-        dates.add(f.stem)
-
-    dates = sorted(
-        dates,
-        reverse=True,
-    )
-
-    with lock:
-        state["history_dates"] = dates
-
-
-def save_current_history():
-    with lock:
-        day = state.get("date") or today_key()
-
-        payload = {
-            "date": day,
-            "expiry": state.get("expiry"),
-            "opening_atm": state.get("opening_atm"),
-            "nifty": state.get("nifty", {}),
-            "vix": state.get("vix", {}),
-            "zone": state.get("zone", {}),
-            "oic": state.get("oic", {}),
-            "premium": state.get("premium", {}),
-            "series": state.get("series", {}),
-            "strategies": state.get("strategies", {}),
-            "strategy_engine": state.get("strategy_engine", {}),
-            "saved_at": now_ist().isoformat(),
-        }
-
-    # Local file remains as a temporary fallback.
-    safe_json_save(
-        history_file(day),
-        payload,
-    )
-
-    # Neon PostgreSQL is the permanent source of truth.
-    save_history_to_db(
-        day,
-        payload,
-    )
-
-    refresh_history_dates()
-
-
-# ============================================================
-# ACCESS TOKEN
-# ============================================================
-# The daily Kite access token is persisted in Neon so a Render restart
-# does not depend on Render's temporary local filesystem.  We keep the
-# local JSON file only as a fallback when the database is unavailable.
-
-def save_access_token(token):
-    token_day = now_ist().date()
-    saved_to_db = False
-
-    if db_enabled():
-        try:
-            with db_connect() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO pratik_kite_session
-                            (session_id, token_day, access_token, updated_at)
-                        VALUES (1, %s, %s, NOW())
-                        ON CONFLICT (session_id)
-                        DO UPDATE SET
-                            token_day = EXCLUDED.token_day,
-                            access_token = EXCLUDED.access_token,
-                            updated_at = NOW()
-                        """,
-                        (token_day, token),
-                    )
-                conn.commit()
-            saved_to_db = True
-            print("[KITE] Today's access token saved to Neon.", flush=True)
-        except Exception as e:
-            print(f"[KITE] Neon token save failed: {e}", flush=True)
-
-    # Fallback copy. It is not relied on across Render restarts.
-    safe_json_save(
-        ACCESS_TOKEN_FILE,
-        {
-            "access_token": token,
-            "token_day": token_day.isoformat(),
-            "saved_at": now_ist().isoformat(),
-            "database_saved": saved_to_db,
-        },
-    )
-
-
-def load_access_token():
-    today = now_ist().date()
-
-    if db_enabled():
-        try:
-            with db_connect() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT access_token
-                        FROM pratik_kite_session
-                        WHERE session_id = 1 AND token_day = %s
-                        """,
-                        (today,),
-                    )
-                    row = cur.fetchone()
-            if row and row[0]:
-                print("[KITE] Restored today's access token from Neon.", flush=True)
-                return row[0]
-        except Exception as e:
-            print(f"[KITE] Neon token load failed: {e}", flush=True)
-
-    # Local fallback is accepted only if it belongs to today.
-    data = safe_json_load(ACCESS_TOKEN_FILE, {})
-    token = data.get("access_token")
-    token_day = data.get("token_day")
-    if token and token_day == today.isoformat():
-        print("[KITE] Restored today's access token from local fallback.", flush=True)
-        return token
-
-    return None
-
-
-def clear_access_token():
-    if db_enabled():
-        try:
-            with db_connect() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "DELETE FROM pratik_kite_session WHERE session_id = 1"
-                    )
-                conn.commit()
-        except Exception as e:
-            print(f"[KITE] Neon token clear failed: {e}", flush=True)
-
-    try:
-        ACCESS_TOKEN_FILE.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-
-def restore_kite_session():
-    """Reconnect server-side after a Render restart, without a browser."""
-    if not (KITE_API_KEY and KITE_API_SECRET):
-        return False
-
-    token = load_access_token()
-    if not token:
-        return False
-
-    try:
-        start_live(token)
-        print("[KITE] Server-side session restored successfully.", flush=True)
-        return True
-    except Exception as e:
-        # Stage 7K: a transient REST/WebSocket/instrument-discovery failure is
-        # not proof that today's access token is invalid. Keep the Neon token so
-        # a Render restart or explicit reconnect can reuse it.
-        print(f"[KITE] Saved session restore failed: {e}", flush=True)
-        with lock:
-            state["connected"] = False
-            state["message"] = f"Feed startup failed — retry/restart service ({type(e).__name__})"
-        return False
-
-
-# ============================================================
-# ZONE ENGINE
-# ============================================================
-
-def round_to_100(value):
-    return int(
-        round(float(value) / 100.0) * 100
-    )
-
-
-def calculate_zone(open_price, previous_close):
-    if not open_price or not previous_close:
-        return {
-            "quadrant": None,
-            "zone": None,
-            "opening_pct": None,
-            "levels": {},
-        }
-
-    opening_pct = (
-        (open_price - previous_close)
-        / previous_close
-        * 100
-    )
-
-    quadrant = "Q1" if opening_pct >= 0 else "Q2"
-
-    abs_pct = abs(opening_pct)
-
-    if abs_pct <= 0.25:
-        zone = "Z0"
-    elif abs_pct <= 0.50:
-        zone = "Z1"
-    elif abs_pct <= 0.75:
-        zone = "Z2"
-    elif abs_pct <= 1.00:
-        zone = "Z3"
+def round_to_100(v):
+    return int(round(float(v) / 100.0) * 100)
+
+def append_or_replace(series, point):
+    if series and series[-1].get("time") == point.get("time"):
+        series[-1] = point
     else:
-        zone = "Outside Z3"
+        series.append(point)
 
-    percentages = [
-        -1.00,
-        -0.75,
-        -0.50,
-        -0.25,
-        0.00,
-        0.25,
-        0.50,
-        0.75,
-        1.00,
-    ]
-
-    levels = {}
-
-    for pct in percentages:
-        value = previous_close * (
-            1 + pct / 100
-        )
-
-        if pct > 0:
-            key = f"+{pct:.2f}%"
-        else:
-            key = f"{pct:.2f}%"
-
-        levels[key] = round(value, 2)
-
-    return {
-        "quadrant": quadrant,
-        "zone": zone,
-        "opening_pct": round(
-            opening_pct,
-            3,
-        ),
-        "levels": levels,
-    }
-
-
-# ============================================================
-# INDIA VIX
-# ============================================================
-
-def classify_vix(value):
-    if value is None:
-        return None, None
-
-    value = float(value)
-
-    if value < 12:
-        return (
-            "<12 LOW",
-            "Low volatility. Market may be relatively calm; option premiums can be lower.",
-        )
-
-    if value < 15:
-        return (
-            "12–15 NORMAL",
-            "Normal volatility zone.",
-        )
-
-    if value < 20:
-        return (
-            "15–20 ELEVATED",
-            "Elevated volatility. Expect larger intraday movement.",
-        )
-
-    if value < 25:
-        return (
-            "20–25 HIGH",
-            "High volatility. Use additional caution.",
-        )
-
-    return (
-        "≥25 VERY HIGH",
-        "Very high volatility. Large and rapid market movement is possible.",
-    )
-
-
-# ============================================================
-# INSTRUMENT DISCOVERY
-# ============================================================
-
-def discover_instruments(k):
-    global nifty_token
-    global vix_token
-    global option_instruments
-    global token_meta
-
-    print(
-        "[DIAG] Loading instruments...",
-        flush=True,
-    )
-
+def discover(k):
+    global nifty_token, option_rows, token_meta
     nse = k.instruments("NSE")
     nfo = k.instruments("NFO")
 
-    print(
-        f"[DIAG] NSE={len(nse)} NFO={len(nfo)}",
-        flush=True,
-    )
-
-    for row in nse:
-        symbol = str(
-            row.get("tradingsymbol", "")
-        ).upper()
-
-        name = str(
-            row.get("name", "")
-        ).upper()
-
-        if symbol == "NIFTY 50" or name == "NIFTY 50":
-            nifty_token = int(
-                row["instrument_token"]
-            )
-
-        if symbol == "INDIA VIX" or name == "INDIA VIX":
-            vix_token = int(
-                row["instrument_token"]
-            )
+    nifty_token = None
+    for r in nse:
+        sym = str(r.get("tradingsymbol", "")).upper()
+        name = str(r.get("name", "")).upper()
+        if sym == "NIFTY 50" or name == "NIFTY 50":
+            nifty_token = int(r["instrument_token"])
+            break
+    if not nifty_token:
+        raise RuntimeError("NIFTY 50 token not found")
 
     today = now_ist().date()
-
     candidates = []
-
-    for row in nfo:
-        name = str(
-            row.get("name", "")
-        ).upper()
-
-        inst_type = str(
-            row.get("instrument_type", "")
-        ).upper()
-
-        if name != "NIFTY":
+    for r in nfo:
+        if str(r.get("name", "")).upper() != "NIFTY":
             continue
-
-        if inst_type not in ("CE", "PE"):
+        typ = str(r.get("instrument_type", "")).upper()
+        if typ not in ("CE", "PE"):
             continue
-
-        expiry = row.get("expiry")
-
-        if not expiry:
-            continue
-
-        if isinstance(expiry, str):
+        exp = r.get("expiry")
+        if isinstance(exp, str):
             try:
-                expiry = datetime.strptime(
-                    expiry,
-                    "%Y-%m-%d",
-                ).date()
+                exp = datetime.strptime(exp, "%Y-%m-%d").date()
             except Exception:
                 continue
-
-        if expiry < today:
+        if not exp or exp < today:
             continue
-
-        candidates.append(row)
+        candidates.append(r)
 
     if not candidates:
-        raise RuntimeError(
-            "No active NIFTY option contracts found."
-        )
+        raise RuntimeError("No active NIFTY options found")
 
-    nearest_expiry = min(
-        row["expiry"]
-        for row in candidates
-    )
-
-    option_instruments = [
-        row
-        for row in candidates
-        if row["expiry"] == nearest_expiry
-    ]
-
+    expiry = min(r["expiry"] for r in candidates)
+    option_rows = [r for r in candidates if r["expiry"] == expiry]
     token_meta = {}
-
-    for row in option_instruments:
-        token = int(
-            row["instrument_token"]
-        )
-
-        token_meta[token] = {
-            "strike": int(
-                float(row["strike"])
-            ),
-            "type": row["instrument_type"],
-            "symbol": row["tradingsymbol"],
-            "expiry": str(row["expiry"]),
+    for r in option_rows:
+        token_meta[int(r["instrument_token"])] = {
+            "strike": int(float(r["strike"])),
+            "type": str(r["instrument_type"]).upper(),
+            "symbol": r["tradingsymbol"],
         }
 
     with lock:
-        state["expiry"] = str(
-            nearest_expiry
-        )
+        state["expiry"] = str(expiry)
 
-    print(
-        f"[DIAG] NIFTY token={nifty_token}",
-        flush=True,
-    )
-
-    print(
-        f"[DIAG] VIX token={vix_token}",
-        flush=True,
-    )
-
-    print(
-        f"[DIAG] Nearest expiry={nearest_expiry}",
-        flush=True,
-    )
-
-    print(
-        f"[DIAG] Option contracts loaded={len(option_instruments)}",
-        flush=True,
-    )
-
-
-# ============================================================
-# OIC STRIKE LOCK
-# ============================================================
-
-def lock_oic_strikes():
-    global oic_tokens
-    global premium_token_map
-
-    with lock:
-        atm = state.get(
-            "opening_atm"
-        )
-
-    if not atm:
-        print(
-            "[DIAG] Opening ATM missing",
-            flush=True,
-        )
-        return False
-
-    wanted = {
-        "atm": atm,
-        "minus100": atm - 100,
-        "plus100": atm + 100,
+def quote_nifty(k):
+    q = k.quote(["NSE:NIFTY 50"]).get("NSE:NIFTY 50") or {}
+    ohlc = q.get("ohlc") or {}
+    return {
+        "price": float(q["last_price"]) if q.get("last_price") is not None else None,
+        "open": float(ohlc["open"]) if ohlc.get("open") is not None else None,
+        "high": float(ohlc["high"]) if ohlc.get("high") is not None else None,
+        "low": float(ohlc["low"]) if ohlc.get("low") is not None else None,
+        "previous_close": float(ohlc["close"]) if ohlc.get("close") is not None else None,
     }
 
-    mapping = {}
+def lock_strikes(k):
+    global locked
+    with lock:
+        atm = state.get("opening_atm")
+    if not atm:
+        n = quote_nifty(k)
+        if n.get("open") is None:
+            return False
+        atm = round_to_100(n["open"])
+        with lock:
+            state["opening_atm"] = atm
+            state["nifty"].update(n)
 
+    wanted = {"minus100": atm - 100, "atm": atm, "plus100": atm + 100}
+    m = {}
     for key, strike in wanted.items():
-        ce_token = None
-        pe_token = None
-
+        ce = pe = None
         for token, meta in token_meta.items():
             if meta["strike"] != strike:
                 continue
-
             if meta["type"] == "CE":
-                ce_token = token
-
+                ce = token
             elif meta["type"] == "PE":
-                pe_token = token
+                pe = token
+        if ce and pe:
+            m[key] = {"strike": strike, "CE": ce, "PE": pe}
+    locked = m
+    return len(locked) == 3
 
-        if ce_token and pe_token:
-            mapping[key] = {
-                "strike": strike,
-                "CE": ce_token,
-                "PE": pe_token,
-            }
-
-    oic_tokens = mapping
-
-    # Reverse token lookup used by the premium OHLC aggregator.
-    premium_token_map = {}
-    for key, legs in mapping.items():
-        for option_type in ("CE", "PE"):
-            token = legs.get(option_type)
-            if token:
-                premium_token_map[int(token)] = {
-                    "key": key,
-                    "type": option_type,
-                    "strike": int(legs["strike"]),
-                }
-
-    with lock:
-        state["oic"]["atm"] = atm
-        state["oic"]["minus100"] = atm - 100
-        state["oic"]["plus100"] = atm + 100
-        for premium_key in ("atm", "minus100", "plus100"):
-            if not isinstance(state["premium"].get(premium_key), dict):
-                state["premium"][premium_key] = {}
-
-    print(
-        f"[DIAG] OIC strike mapping={mapping}",
-        flush=True,
-    )
-
-    return len(mapping) == 3
-
-
-def ensure_locked_strike_mappings(k=None):
-    """
-    Fail-safe for the three locked OIC/premium strikes.
-
-    Stage-7 could remain with empty oic_tokens/premium_token_map when the
-    server restored mid-session before state['opening_atm'] had been rebuilt.
-    This routine reconstructs the opening ATM from the best available source
-    and then rebuilds both token maps. It is safe to call repeatedly.
-    """
-    global oic_tokens
-    global premium_token_map
-
-    # Already healthy.
-    if len(oic_tokens) == 3 and len(premium_token_map) == 6:
-        return True
-
-    with lock:
-        atm = state.get("opening_atm")
-        state_nifty = dict(state.get("nifty") or {})
-
-    # First prefer an already-known session open.
-    open_price = state_nifty.get("open") or latest_nifty.get("open")
-    previous_close = (
-        state_nifty.get("previous_close")
-        or latest_nifty.get("previous_close")
-    )
-
-    # If a Render restart happened mid-session and no NIFTY FULL tick has yet
-    # rebuilt the open, fetch one current quote from Kite REST.
-    if not atm and open_price is None and k is not None:
-        try:
-            quote = k.quote(["NSE:NIFTY 50"]) or {}
-            row = quote.get("NSE:NIFTY 50") or {}
-            q_ohlc = row.get("ohlc") or {}
-            open_price = q_ohlc.get("open")
-            previous_close = previous_close or q_ohlc.get("close")
-
-            if row.get("last_price") is not None:
-                latest_nifty["price"] = float(row["last_price"])
-            if open_price is not None:
-                latest_nifty["open"] = float(open_price)
-            if q_ohlc.get("high") is not None:
-                latest_nifty["high"] = float(q_ohlc["high"])
-            if q_ohlc.get("low") is not None:
-                latest_nifty["low"] = float(q_ohlc["low"])
-            if previous_close is not None:
-                latest_nifty["previous_close"] = float(previous_close)
-
-            with lock:
-                state["nifty"] = dict(latest_nifty)
-
-            print(
-                f"[DIAG] Mapping repair quote open={open_price} pc={previous_close}",
-                flush=True,
-            )
-        except Exception as e:
-            print(f"[DIAG] Mapping repair quote failed: {e}", flush=True)
-
-    if not atm and open_price is not None:
-        atm = round_to_100(open_price)
-        with lock:
-            state["opening_atm"] = atm
-            if previous_close:
-                state["zone"] = calculate_zone(open_price, previous_close)
-        print(f"[DIAG] Reconstructed opening ATM={atm}", flush=True)
-
-    if not atm:
-        print("[DIAG] Mapping repair waiting for NIFTY session open", flush=True)
-        return False
-
-    ok = lock_oic_strikes()
-
-    print(
-        f"[DIAG] Mapping repair result ok={ok} OIC={len(oic_tokens)}/3 PREMIUM={len(premium_token_map)}/6",
-        flush=True,
-    )
-    return ok and len(premium_token_map) == 6
-
-
-# ============================================================
-# PREVIOUS DAY OI BASELINE
-# ============================================================
-
-def previous_oi_for_token(k, token):
-    end = (
-        now_ist().date()
-        - timedelta(days=1)
-    )
-
-    start = (
-        end
-        - timedelta(days=10)
-    )
-
+def previous_oi(k, token):
+    end = now_ist().date() - timedelta(days=1)
+    start = end - timedelta(days=10)
     try:
-        candles = k.historical_data(
-            token,
-            start,
-            end,
-            "day",
-            oi=True,
-        )
-
-        if not candles:
-            return None
-
-        for candle in reversed(candles):
-            if candle.get("oi") is not None:
-                return int(candle["oi"])
-
-    except Exception as e:
-        print(
-            f"[DIAG] Historical OI failed token={token}: {e}",
-            flush=True,
-        )
-
+        candles = k.historical_data(token, start, end, "day", oi=True)
+        for c in reversed(candles or []):
+            if c.get("oi") is not None:
+                return int(c["oi"])
+    except Exception:
+        pass
     return None
 
-
-def build_oi_baseline():
-    global baseline_ready
-    global baseline_thread_started
-    global prev_oi
-
-    baseline_thread_started = True
-
+def build_baseline():
+    global baseline_ready, baseline_oi
+    result = {}
     try:
-        cached = safe_json_load(
-            BASELINE_FILE,
-            {},
-        )
-
-        cache_date = cached.get("date")
-        cache_expiry = cached.get("expiry")
-
-        with lock:
-            current_expiry = state.get(
-                "expiry"
-            )
-
-        if (
-            cache_date == today_key()
-            and cache_expiry == current_expiry
-            and cached.get("oi")
-        ):
-            prev_oi = {
-                int(k): int(v)
-                for k, v in cached[
-                    "oi"
-                ].items()
-            }
-
-            baseline_ready = True
-
-            print(
-                f"[DIAG] CIO baseline loaded. Contracts={len(prev_oi)}",
-                flush=True,
-            )
-
-            return
-
-        result = {}
-
-        for index, row in enumerate(
-            option_instruments,
-            start=1,
-        ):
-            token = int(
-                row["instrument_token"]
-            )
-
-            value = previous_oi_for_token(
-                kite,
-                token,
-            )
-
-            if value is not None:
-                result[token] = value
-
-            if index % 20 == 0:
-                print(
-                    f"[DIAG] Baseline {index}/{len(option_instruments)}",
-                    flush=True,
-                )
-
+        for i, token in enumerate(token_meta):
+            v = previous_oi(kite, token)
+            if v is not None:
+                result[token] = v
             time.sleep(0.35)
-
-        prev_oi = result
-
-        safe_json_save(
-            BASELINE_FILE,
-            {
-                "date": today_key(),
-                "expiry": state.get(
-                    "expiry"
-                ),
-                "oi": {
-                    str(k): v
-                    for k, v in result.items()
-                },
-            },
-        )
-
+        baseline_oi = result
         baseline_ready = True
-
-        print(
-            f"[DIAG] CIO baseline ready. Contracts={len(prev_oi)}",
-            flush=True,
-        )
-
+        print(f"[BASELINE] ready {len(result)} contracts", flush=True)
     except Exception as e:
         baseline_ready = False
-
-        print(
-            f"[DIAG] CIO baseline ERROR: {e}",
-            flush=True,
-        )
-
-    finally:
-        baseline_thread_started = False
-
-
-# ============================================================
-# CIO
-# ============================================================
+        print(f"[BASELINE] error: {e}", flush=True)
 
 def cio_totals():
-    ce = 0
-    pe = 0
-
-    for token, current in latest_oi.items():
-        baseline = prev_oi.get(token)
+    ce = pe = 0
+    for token, cur in latest_oi.items():
+        base = baseline_oi.get(token)
         meta = token_meta.get(token)
-
-        if baseline is None or not meta:
+        if base is None or not meta:
             continue
-
-        delta = int(current) - int(
-            baseline
-        )
-
+        delta = int(cur) - int(base)
         if delta >= 0:
             continue
-
         if meta["type"] == "CE":
             ce += delta
-
         elif meta["type"] == "PE":
             pe += delta
-
     return ce, pe
 
-
-# ============================================================
-# SERIES
-# ============================================================
-
-def append_or_replace_minute(
-    series,
-    point,
-):
-    if not series:
-        series.append(point)
-        return
-
-    if (
-        series[-1].get("time")
-        == point.get("time")
-    ):
-        series[-1] = point
-
-    else:
-        series.append(point)
-
-
-def oic_point(key):
-    legs = oic_tokens.get(key)
-
-    if not legs:
-        return None
-
-    ce = latest_oi.get(
-        legs["CE"]
-    )
-
-    pe = latest_oi.get(
-        legs["PE"]
-    )
-
-    if ce is None or pe is None:
-        return None
-
-    return {
-        "time": minute_label(),
-        "timestamp": now_ist().isoformat(),
-        "ce": int(ce),
-        "pe": int(pe),
-    }
-
-
-def update_nifty_minute_ohlc(price):
-    """Aggregate live NIFTY ticks into a true 1-minute OHLC candle."""
-    global nifty_minute_bucket
-
-    if price is None:
-        return
-
-    p = float(price)
-    n = now_ist()
-    minute = n.strftime("%H:%M")
-    timestamp = n.isoformat()
-
-    with lock:
-        # Minute rollover: finalise the previous candle in memory first.
-        if (
-            nifty_minute_bucket
-            and nifty_minute_bucket.get("time") != minute
-        ):
-            finalised = dict(nifty_minute_bucket)
-            finalised["price"] = finalised.get("close")
-            append_or_replace_minute(
-                state["series"]["nifty"],
-                finalised,
-            )
-            nifty_minute_bucket = None
-
-        if nifty_minute_bucket is None:
-            nifty_minute_bucket = {
-                "time": minute,
-                "timestamp": timestamp,
-                "open": p,
-                "high": p,
-                "low": p,
-                "close": p,
-                # Backward-compatible alias used by the existing chart/API.
-                "price": p,
-            }
-        else:
-            nifty_minute_bucket["high"] = max(
-                float(nifty_minute_bucket.get("high", p)),
-                p,
-            )
-            nifty_minute_bucket["low"] = min(
-                float(nifty_minute_bucket.get("low", p)),
-                p,
-            )
-            nifty_minute_bucket["close"] = p
-            nifty_minute_bucket["price"] = p
-            nifty_minute_bucket["timestamp"] = timestamp
-
-
-def snapshot_current_nifty_candle():
-    """Copy the current in-progress minute candle into state history."""
-    with lock:
-        if not nifty_minute_bucket:
-            return
-
-        point = dict(nifty_minute_bucket)
-        point["price"] = point.get("close")
-        append_or_replace_minute(
-            state["series"]["nifty"],
-            point,
-        )
-
-
-
-def update_premium_lightweight(token, price, oi=None):
-    """Record only minute close/LTP + OI needed by pressure/reports."""
-    meta = premium_token_map.get(token)
-    if not meta or price is None:
-        return
-
-    key = meta["key"]
-    option_type = meta["type"]
-    minute = now_ist().strftime("%H:%M")
-    timestamp = now_ist().isoformat()
-    p = float(price)
-    oi_val = int(oi) if oi is not None else None
-
-    rows = state["series"]["premium"][key][option_type]
-    point = {
-        "time": minute,
-        "timestamp": timestamp,
-        "close": p,
-        "price": p,
-        "oi": oi_val,
-    }
-
-    if rows and rows[-1].get("time") == minute:
-        rows[-1].update(point)
-    else:
-        rows.append(point)
-
-    with lock:
-        # Historical payloads from older premium-chart versions may contain
-        # a scalar/int in this slot. Normalize it before assigning CE/PE data.
-        if not isinstance(state.get("premium"), dict):
-            state["premium"] = {}
-        if not isinstance(state["premium"].get(key), dict):
-            state["premium"][key] = {}
-        state["premium"][key][option_type] = {
-            "ltp": p,
-            "oi": oi_val,
-            "time": minute,
-            "timestamp": timestamp,
-        }
-
-
-def update_premium_minute_ohlc(token, price, oi=None):
-    """Aggregate one of the six locked option contracts into true 1-minute OHLC."""
-    global premium_minute_buckets
-
-    meta = premium_token_map.get(int(token))
-    if not meta or price is None:
-        return
-
-    p = float(price)
-    n = now_ist()
-    minute = n.strftime("%H:%M")
-    timestamp = n.isoformat()
-    token = int(token)
-
-    with lock:
-        bucket = premium_minute_buckets.get(token)
-
-        if bucket and bucket.get("time") != minute:
-            finalised = dict(bucket)
-            append_or_replace_minute(
-                state["series"]["premium"][meta["key"]][meta["type"]],
-                finalised,
-            )
-            bucket = None
-
-        if bucket is None:
-            bucket = {
-                "time": minute,
-                "timestamp": timestamp,
-                "strike": meta["strike"],
-                "type": meta["type"],
-                "open": p,
-                "high": p,
-                "low": p,
-                "close": p,
-                "ltp": p,
-                "oi": int(oi) if oi is not None else latest_oi.get(token),
-            }
-        else:
-            bucket["high"] = max(float(bucket.get("high", p)), p)
-            bucket["low"] = min(float(bucket.get("low", p)), p)
-            bucket["close"] = p
-            bucket["ltp"] = p
-            bucket["timestamp"] = timestamp
-            if oi is not None:
-                bucket["oi"] = int(oi)
-            elif latest_oi.get(token) is not None:
-                bucket["oi"] = int(latest_oi[token])
-
-        premium_minute_buckets[token] = bucket
-
-
-def snapshot_current_premium_candles():
-    """Copy all in-progress premium candles into state before persistence."""
-    with lock:
-        for token, bucket in list(premium_minute_buckets.items()):
-            if not bucket:
-                continue
-            meta = premium_token_map.get(int(token))
-            if not meta:
-                continue
-            append_or_replace_minute(
-                state["series"]["premium"][meta["key"]][meta["type"]],
-                dict(bucket),
-            )
-
-
-
-# ============================================================
-# LIVE S1 / S2 / PNA SIGNAL ENGINE
-# ============================================================
-# The engine uses the locked three opening strikes and the OIC/CIO rules:
-# - no entries during 09:15-09:30 observation period
-# - direction is measured from rolling 5-minute OI change at ATM-100/ATM/ATM+100
-# - bullish OI flow = PE OI rising while CE OI falls -> SELL PE
-# - bearish OI flow = CE OI rising while PE OI falls -> SELL CE
-# - CIO confirms bullish when CE negative-change is stronger than PE; bearish is the mirror
-# - S1 requires >=2/3 agreement + CIO for 3 consecutive one-minute readings
-# - S2 reacts to a visible momentum shift on >=2/3 strikes + CIO (earlier / no 3-read wait)
-# - PNA requires >=2/3 agreement, weighted MasterD clear (|MasterD| >= 35),
-#   CIO confirmation and 3 consecutive readings
-# - hard SL = 30 NIFTY points; all open trades time-exit at/after 14:45
-# Strategies are evaluated independently so S1/S2/PNA can coexist for research.
-
-STRATEGY_MASTER_CLEAR = 35.0
-STRATEGY_HARD_SL_POINTS = 30.0
-STRATEGY_MAX_TRADES_PER_STRATEGY = 3
-
-
-def _row_minutes(time_text):
+def _row_minutes(t):
     try:
-        hh, mm = str(time_text).split(":")[:2]
-        return int(hh) * 60 + int(mm)
+        h, m = str(t).split(":")[:2]
+        return int(h) * 60 + int(m)
     except Exception:
         return None
 
-
-STRATEGY_LAST_EXIT_MINUTE = 14 * 60 + 45
-
-
-def _strategy_market_clock():
-    """Return the latest recorded NIFTY market minute/timestamp, never wall-clock time."""
-    rows = state.get("series", {}).get("nifty", []) or []
-    row = rows[-1] if rows else {}
-    t = row.get("time")
-    ts = row.get("timestamp")
-    m = _row_minutes(t)
-    if m is None:
-        return None, None, None
-    return str(t)[:5], ts, m
-
-
-def _strategy_price_at_or_before(target_minutes):
-    """Use only a recorded NIFTY point at/before the requested market minute."""
-    found = _point_at_or_before(state.get("series", {}).get("nifty", []), target_minutes)
-    if not found:
-        return None
-    row = found
-    price = row.get("close", row.get("price"))
-    try:
-        return float(price)
-    except Exception:
-        return None
-
-
-def _point_at_or_before(series, target_minutes):
+def _point_at_or_before(rows, target):
     best = None
-    for row in series or []:
-        m = _row_minutes(row.get("time"))
-        if m is None or m > target_minutes:
+    for r in rows or []:
+        m = _row_minutes(r.get("time"))
+        if m is None or m > target:
             continue
         if best is None or m > best[0]:
-            best = (m, row)
+            best = (m, r)
     return best[1] if best else None
 
-
-def _five_minute_delta(series):
-    if not series:
+def _five_delta(rows):
+    if not rows:
         return None
-    cur = series[-1]
-    cur_m = _row_minutes(cur.get("time"))
-    if cur_m is None:
-        return None
-    old = _point_at_or_before(series, cur_m - 5)
-    if old is None:
+    cur = rows[-1]
+    cm = _row_minutes(cur.get("time"))
+    old = _point_at_or_before(rows, cm - 5) if cm is not None else None
+    if not old:
         return None
     return {
         "ce": float(cur.get("ce", 0)) - float(old.get("ce", 0)),
         "pe": float(cur.get("pe", 0)) - float(old.get("pe", 0)),
     }
 
-
-def _dominance(delta):
-    if not delta:
-        return 0.0
-    ce, pe = float(delta["ce"]), float(delta["pe"])
-    den = abs(ce) + abs(pe)
-    return ((ce - pe) / den * 100.0) if den else 0.0
-
-
-def _flow_direction(delta):
-    if not delta:
+def _flow(d):
+    if not d:
         return None
-    ce, pe = float(delta["ce"]), float(delta["pe"])
+    ce, pe = d["ce"], d["pe"]
     if pe > 0 and ce < 0:
-        return "PE"  # bullish -> sell PE
+        return "PE"
     if ce > 0 and pe < 0:
-        return "CE"  # bearish -> sell CE
+        return "CE"
     return None
 
+def _dom(d):
+    if not d:
+        return 0.0
+    ce, pe = float(d["ce"]), float(d["pe"])
+    den = abs(ce) + abs(pe)
+    return ((ce - pe) / den * 100) if den else 0.0
 
-def _strategy_metrics():
-    deltas = {}
-    dirs = {}
-    dom = {}
+def metrics():
+    ds, dirs, dom = {}, {}, {}
     for key in ("minus100", "atm", "plus100"):
-        d = _five_minute_delta(state.get("series", {}).get(key, []))
-        deltas[key] = d
-        dirs[key] = _flow_direction(d)
-        dom[key] = _dominance(d)
-
+        d = _five_delta(state["series"][key])
+        ds[key] = d
+        dirs[key] = _flow(d)
+        dom[key] = _dom(d)
     pe_votes = sum(1 for x in dirs.values() if x == "PE")
     ce_votes = sum(1 for x in dirs.values() if x == "CE")
     master = 0.25 * dom["minus100"] + 0.50 * dom["atm"] + 0.25 * dom["plus100"]
+    cio = state["series"]["cio"][-1] if state["series"]["cio"] else {}
+    cce = float(cio.get("ce", 0) or 0)
+    cpe = float(cio.get("pe", 0) or 0)
+    cdir = "PE" if cce < cpe else ("CE" if cpe < cce else None)
+    return {"pe_votes": pe_votes, "ce_votes": ce_votes, "master_d": master, "cio_direction": cdir}
 
-    cio_rows = state.get("series", {}).get("cio", [])
-    cio = cio_rows[-1] if cio_rows else {}
-    cio_ce = float(cio.get("ce", 0) or 0)
-    cio_pe = float(cio.get("pe", 0) or 0)
-    cio_dir = "PE" if cio_ce < cio_pe else ("CE" if cio_pe < cio_ce else None)
+def recent(name, direction):
+    return int(state["strategy_engine"]["recent"].get(f"{name}:{direction}", 0))
 
-    return {
-        "time": minute_label(), "deltas": deltas, "directions": dirs,
-        "pe_votes": pe_votes, "ce_votes": ce_votes,
-        "master_d": round(master, 2), "cio_ce": int(cio_ce), "cio_pe": int(cio_pe),
-        "cio_direction": cio_dir,
-    }
+def set_recent(name, direction, v):
+    state["strategy_engine"]["recent"][f"{name}:{direction}"] = int(v)
 
-
-def _recent_direction_count(strategy_name, direction):
-    runtime = state.setdefault("strategy_engine", {}).setdefault("recent", {})
-    key = f"{strategy_name}:{direction}"
-    return int(runtime.get(key, 0))
-
-
-def _set_direction_count(strategy_name, direction, value):
-    runtime = state.setdefault("strategy_engine", {}).setdefault("recent", {})
-    runtime[f"{strategy_name}:{direction}"] = int(value)
-
-
-def _update_persistence(strategy_name, direction, condition):
+def persist(name, direction, cond):
     other = "CE" if direction == "PE" else "PE"
-    if condition:
-        _set_direction_count(strategy_name, direction, _recent_direction_count(strategy_name, direction) + 1)
-    else:
-        _set_direction_count(strategy_name, direction, 0)
-    if condition:
-        _set_direction_count(strategy_name, other, 0)
-    return _recent_direction_count(strategy_name, direction)
+    set_recent(name, direction, recent(name, direction) + 1 if cond else 0)
+    if cond:
+        set_recent(name, other, 0)
+    return recent(name, direction)
 
-
-def _signal_record(strategy_name, action, option_type, price, reason, metrics, market_time=None, market_timestamp=None):
-    market_time = market_time or metrics.get("market_time")
-    market_timestamp = market_timestamp or metrics.get("market_timestamp")
-    return {
-        "time": market_time, "timestamp": market_timestamp, "strategy": strategy_name,
-        "action": action, "type": option_type, "nifty_level": round(float(price), 2),
-        "reason": reason, "master_d": metrics.get("master_d"),
-        "pe_votes": metrics.get("pe_votes"), "ce_votes": metrics.get("ce_votes"),
-        "cio_direction": metrics.get("cio_direction"),
-    }
-
-
-def _enter_strategy(strategy_name, option_type, price, reason, metrics):
-    s = state["strategies"][strategy_name]
-    if s.get("active") or len(s.get("trades", [])) >= STRATEGY_MAX_TRADES_PER_STRATEGY:
+def enter(name, typ, price):
+    s = state["strategies"][name]
+    if s["active"] or len(s["trades"]) >= MAX_TRADES:
         return
     p = float(price)
-    sl = p - STRATEGY_HARD_SL_POINTS if option_type == "PE" else p + STRATEGY_HARD_SL_POINTS
-    trade = {
-        "date": today_key(), "type": option_type, "side": f"SELL {option_type}",
-        "entry_time": metrics.get("market_time"), "entry_timestamp": metrics.get("market_timestamp"),
-        "entry_level": round(p, 2), "sl_level": round(sl, 2), "exit_time": None,
-        "exit_level": None, "points": None, "mae": 0.0, "mfe": 0.0,
-        "sl_hit": False, "result": "OPEN", "exit_reason": None,
-        "entry_reason": reason, "master_d_entry": metrics.get("master_d"),
+    sl = p - HARD_SL if typ == "PE" else p + HARD_SL
+    s["active"] = {
+        "type": typ,
+        "entry_time": minute_label(),
+        "entry_level": round(p, 2),
+        "sl_level": round(sl, 2),
+        "exit_time": None,
+        "exit_level": None,
+        "points": None,
     }
-    s["active"] = trade
-    s.setdefault("signals", []).append(_signal_record(strategy_name, "ENTRY", option_type, p, reason, metrics))
 
-
-def _update_excursions(trade, price):
-    p, e = float(price), float(trade["entry_level"])
-    if trade.get("type") == "PE":
-        favorable, adverse = max(0.0, p - e), max(0.0, e - p)
-    else:
-        favorable, adverse = max(0.0, e - p), max(0.0, p - e)
-    trade["mfe"] = round(max(float(trade.get("mfe") or 0), favorable), 2)
-    trade["mae"] = round(max(float(trade.get("mae") or 0), adverse), 2)
-
-
-def _exit_strategy(strategy_name, price, reason, metrics, sl_hit=False):
-    s = state["strategies"][strategy_name]
-    trade = s.get("active")
-    if not trade:
+def exit_trade(name, price, reason):
+    s = state["strategies"][name]
+    t = s.get("active")
+    if not t:
         return
-    p, e = float(price), float(trade["entry_level"])
-    points = p - e if trade.get("type") == "PE" else e - p
-    trade.update({
-        "exit_time": metrics.get("market_time"), "exit_timestamp": metrics.get("market_timestamp"),
-        "exit_level": round(p, 2), "points": round(points, 2), "sl_hit": bool(sl_hit),
-        "result": "WIN" if points > 0 else ("LOSS" if points < 0 else "FLAT"),
+    p, e = float(price), float(t["entry_level"])
+    pts = p - e if t["type"] == "PE" else e - p
+    t.update({
+        "exit_time": minute_label(),
+        "exit_level": round(p, 2),
+        "points": round(pts, 2),
         "exit_reason": reason,
     })
-    s.setdefault("trades", []).append(dict(trade))
-    s.setdefault("signals", []).append(_signal_record(strategy_name, "EXIT", trade.get("type"), p, reason, metrics))
+    s["trades"].append(dict(t))
     s["active"] = None
-    _set_direction_count(strategy_name, "PE", 0)
-    _set_direction_count(strategy_name, "CE", 0)
+    set_recent(name, "PE", 0)
+    set_recent(name, "CE", 0)
 
-
-def evaluate_live_strategies():
-    """Evaluate once per completed/snapshotted minute from the recorded OIC+CIO series."""
-    price = state.get("nifty", {}).get("price")
+def evaluate_strategies():
+    price = state["nifty"].get("price")
     if price is None or not baseline_ready:
         return
-    market_time, market_timestamp, now_m = _strategy_market_clock()
-    if now_m is None:
+    m = market_minute()
+    label = minute_label()
+    if state["strategy_engine"].get("last_eval_minute") == label:
         return
-    engine = state.setdefault("strategy_engine", {})
-    if engine.get("last_eval_minute") == market_time:
-        return
-    engine["last_eval_minute"] = market_time
+    state["strategy_engine"]["last_eval_minute"] = label
+    met = metrics()
 
-    metrics = _strategy_metrics()
-    metrics["market_time"] = market_time
-    metrics["market_timestamp"] = market_timestamp
-    metrics["time"] = market_time
-    engine["metrics"] = metrics
-    p = float(price)
-
-    # First manage any active positions. Hard SL has priority.
     for name in ("S1", "S2", "PNA"):
-        trade = state["strategies"][name].get("active")
-        if not trade:
+        t = state["strategies"][name].get("active")
+        if not t:
             continue
-        _update_excursions(trade, p)
-        if (trade["type"] == "PE" and p <= float(trade["sl_level"])) or (trade["type"] == "CE" and p >= float(trade["sl_level"])):
-            _exit_strategy(name, p, "30-POINT HARD SL", metrics, True)
+        if (t["type"] == "PE" and price <= t["sl_level"]) or (t["type"] == "CE" and price >= t["sl_level"]):
+            exit_trade(name, price, "30-POINT HARD SL")
             continue
-        if now_m >= STRATEGY_LAST_EXIT_MINUTE:
-            cutoff_price = _strategy_price_at_or_before(STRATEGY_LAST_EXIT_MINUTE)
-            if cutoff_price is not None:
-                cutoff_metrics = dict(metrics)
-                cutoff_metrics["market_time"] = "14:45"
-                cutoff_metrics["market_timestamp"] = None
-                _exit_strategy(name, cutoff_price, "14:45 TIME EXIT", cutoff_metrics, False)
+        if m >= STRATEGY_EXIT:
+            exit_trade(name, price, "14:45 TIME EXIT")
             continue
-
-        opposite = "CE" if trade["type"] == "PE" else "PE"
-        votes = metrics["ce_votes"] if opposite == "CE" else metrics["pe_votes"]
-        cio_ok = metrics["cio_direction"] == opposite
+        opposite = "CE" if t["type"] == "PE" else "PE"
+        votes = met["ce_votes"] if opposite == "CE" else met["pe_votes"]
+        cio_ok = met["cio_direction"] == opposite
         if name == "S1":
-            rev_count = _update_persistence("S1_EXIT", opposite, votes >= 2)
-            # Locked S1 exit: 3-reading OIC reversal OR CIO no longer supports current trade.
-            if rev_count >= 3 or metrics["cio_direction"] not in (trade["type"], None):
-                _exit_strategy(name, p, "OIC/CIO REVERSAL", metrics, False)
+            if persist("S1_EXIT", opposite, votes >= 2) >= 3 or met["cio_direction"] not in (t["type"], None):
+                exit_trade(name, price, "OIC/CIO REVERSAL")
         elif name == "S2":
             if votes >= 2 and cio_ok:
-                _exit_strategy(name, p, "MOMENTUM REVERSAL", metrics, False)
-        else:  # PNA
-            master_opposite = metrics["master_d"] >= STRATEGY_MASTER_CLEAR if opposite == "CE" else metrics["master_d"] <= -STRATEGY_MASTER_CLEAR
-            if votes >= 2 and cio_ok and master_opposite:
-                _exit_strategy(name, p, "MASTER OIC/CIO REVERSAL", metrics, False)
+                exit_trade(name, price, "MOMENTUM REVERSAL")
+        else:
+            master_ok = met["master_d"] >= MASTER_CLEAR if opposite == "CE" else met["master_d"] <= -MASTER_CLEAR
+            if votes >= 2 and cio_ok and master_ok:
+                exit_trade(name, price, "MASTER OIC/CIO REVERSAL")
 
-    # Observation window: collect data but no new entries until after 09:30.
-    if now_m < 9 * 60 + 30 or now_m >= STRATEGY_LAST_EXIT_MINUTE:
+    if m < STRATEGY_START or m >= STRATEGY_EXIT:
         return
 
     for direction in ("PE", "CE"):
-        votes = metrics["pe_votes"] if direction == "PE" else metrics["ce_votes"]
-        cio_ok = metrics["cio_direction"] == direction
-        common = votes >= 2 and cio_ok
+        votes = met["pe_votes"] if direction == "PE" else met["ce_votes"]
+        common = votes >= 2 and met["cio_direction"] == direction
 
-        # S2: earliest visible >=2/3 momentum shift with CIO support.
-        if common and not state["strategies"]["S2"].get("active"):
-            _enter_strategy("S2", direction, p, f"Momentum shift {votes}/3 + CIO", metrics)
+        if common and not state["strategies"]["S2"]["active"]:
+            enter("S2", direction, price)
 
-        # S1: same clear dominance must persist for 3 consecutive 1-minute readings.
-        s1_count = _update_persistence("S1", direction, common)
-        if s1_count >= 3 and not state["strategies"]["S1"].get("active"):
-            _enter_strategy("S1", direction, p, f"OIC dominance {votes}/3 + CIO, 3 readings", metrics)
+        if persist("S1", direction, common) >= 3 and not state["strategies"]["S1"]["active"]:
+            enter("S1", direction, price)
 
-        # PNA: multi-layer confirmation with weighted MasterD clear + persistence.
-        master_ok = metrics["master_d"] <= -STRATEGY_MASTER_CLEAR if direction == "PE" else metrics["master_d"] >= STRATEGY_MASTER_CLEAR
-        pna_cond = common and master_ok
-        pna_count = _update_persistence("PNA", direction, pna_cond)
-        if pna_count >= 3 and not state["strategies"]["PNA"].get("active"):
-            _enter_strategy("PNA", direction, p, f"{votes}/3 + MasterD {metrics['master_d']:+.1f} + CIO, 3 readings", metrics)
+        master_ok = met["master_d"] <= -MASTER_CLEAR if direction == "PE" else met["master_d"] >= MASTER_CLEAR
+        if persist("PNA", direction, common and master_ok) >= 3 and not state["strategies"]["PNA"]["active"]:
+            enter("PNA", direction, price)
 
-def live_data_available(max_ws_age=20.0, max_rest_age=20.0):
-    """True when any real market data has arrived recently.
+def poll_once():
+    global last_poll
+    if kite is None or not token_meta or not locked or not is_market():
+        return
 
-    This is suitable for spot/NIFTY freshness, but OIC chart freshness is
-    intentionally checked separately by ``oic_data_available`` below.
-    """
-    now_ts = time.time()
-    ws_fresh = bool(last_live_tick_ts and (now_ts - last_live_tick_ts) <= max_ws_age)
-    rest_fresh = bool(last_rest_quote_ts and (now_ts - last_rest_quote_ts) <= max_rest_age)
-    return ws_fresh or rest_fresh
-
-
-def oic_data_available(max_age=20.0):
-    """True only when the locked OIC option legs have received recent OI.
-
-    A successful REST response for NIFTY/VIX is not enough. Previously that
-    advanced ``last_update`` and marked the feed LIVE even when the locked CE/PE
-    OI legs stopped updating; ``oic_point`` then returned None and the charts
-    silently froze.
-    """
-    if not last_oic_quote_ts:
-        return False
-    return (time.time() - last_oic_quote_ts) <= max_age
-
-
-def _series_minute_number(label):
-    """Convert HH:MM to minutes after midnight; return None for bad labels."""
+    if time.time() - last_poll < 1.8:
+        return
+    if not rest_lock.acquire(timeout=0.1):
+        return
     try:
-        hh, mm = str(label).split(":", 1)
-        return int(hh) * 60 + int(mm)
-    except Exception:
-        return None
+        last_poll = time.time()
+        symbols = ["NSE:NIFTY 50"] + [f"NFO:{m['symbol']}" for m in token_meta.values()]
+        quotes = kite.quote(symbols)
 
-
-def _minute_timestamp(minute_no):
-    """Build an IST timestamp for today's requested minute."""
-    n = now_ist()
-    hh, mm = divmod(int(minute_no), 60)
-    return n.replace(hour=hh, minute=mm, second=0, microsecond=0).isoformat()
-
-
-def _carry_forward_to(series, target_minute, include_target=True):
-    """Fill missing market minutes using the last valid OI/CIO observation.
-
-    Carried rows are explicitly tagged so they can never be confused with a
-    fresh Zerodha observation. Nothing is fabricated before the first real row.
-    """
-    if not series:
-        return 0
-
-    last = series[-1]
-    last_m = _series_minute_number(last.get("time"))
-    if last_m is None:
-        return 0
-
-    market_start = MARKET_START_HOUR * 60 + MARKET_START_MINUTE
-    market_end = MARKET_END_HOUR * 60 + MARKET_END_MINUTE
-    target = max(market_start, min(int(target_minute), market_end))
-    stop = target if include_target else target - 1
-    added = 0
-
-    for m in range(last_m + 1, stop + 1):
-        point = dict(last)
-        point["time"] = f"{m // 60:02d}:{m % 60:02d}"
-        point["timestamp"] = _minute_timestamp(m)
-        point["carried_forward"] = True
-        series.append(point)
-        added += 1
-
-    return added
-
-
-def make_snapshot():
-    """Maintain minute-complete OIC/CIO series through the full market session.
-
-    Fresh REST/WebSocket data updates the current minute normally. If the feed
-    is temporarily stale, the last valid OIC/CIO observation is carried forward
-    so chart/history minutes do not disappear. Strategy evaluation still runs
-    ONLY on fresh market data.
-    """
-    global last_snapshot_ts
-
-    market_fresh = live_data_available()
-    oic_fresh = oic_data_available()
-    n = now_ist()
-    current_m = n.hour * 60 + n.minute
-
-    with lock:
-        # NIFTY remains based on genuine received prices only.
-        if market_fresh:
-            snapshot_current_nifty_candle()
-
-        for key in ("atm", "minus100", "plus100"):
-            series = state["series"][key]
-            if oic_fresh:
-                # Backfill only genuinely missing minutes before the current one.
-                _carry_forward_to(series, current_m, include_target=False)
-                point = oic_point(key)
-                if point:
-                    point["carried_forward"] = False
-                    append_or_replace_minute(series, point)
-                else:
-                    # Defensive fallback: if one locked CE/PE leg is missing from
-                    # the latest quote payload, keep the minute grid moving rather
-                    # than silently freezing the chart.
-                    _carry_forward_to(series, current_m, include_target=True)
-            else:
-                # During a temporary OI feed gap, preserve continuity with the
-                # last known valid value rather than dropping the minute.
-                _carry_forward_to(series, current_m, include_target=True)
-
-        cio_series = state["series"]["cio"]
-        if oic_fresh and baseline_ready:
-            _carry_forward_to(cio_series, current_m, include_target=False)
-            ce, pe = cio_totals()
-            point = {
-                "time": minute_label(),
-                "timestamp": n.isoformat(),
-                "ce": int(ce),
-                "pe": int(pe),
-                "carried_forward": False,
-            }
-            append_or_replace_minute(cio_series, point)
-        else:
-            _carry_forward_to(cio_series, current_m, include_target=True)
-
-        # Never create/exit strategy trades from carried-forward stale OI.
-        if oic_fresh:
-            evaluate_live_strategies()
-
-        # Expose separate health so the browser can distinguish 'server/spot
-        # alive' from 'locked OI is genuinely moving'.
-        state["feed_health"] = {
-            "market_fresh": bool(market_fresh),
-            "oic_fresh": bool(oic_fresh),
-            "last_rest_quote": last_rest_quote_ist,
-            "last_oic_quote": last_oic_quote_ist,
-        }
-
-        last_snapshot_ts = time.time()
-
-
-def backfill_oic_cio_to_market_close():
-    """Complete today's OIC/CIO minute grid through 15:30 after market close.
-
-    This is continuity-only backfill. It uses the last recorded OIC/CIO values,
-    tags every added row as carried_forward=True, and never feeds those rows into
-    S1/S2/PNA strategy evaluation.
-    """
-    n = now_ist()
-    now_m = n.hour * 60 + n.minute
-    market_end = MARKET_END_HOUR * 60 + MARKET_END_MINUTE
-
-    # Only do this after the market has actually ended.
-    if now_m < market_end:
-        return 0
-
-    added = 0
-    with lock:
-        for key in ("atm", "minus100", "plus100", "cio"):
-            series = state.get("series", {}).get(key, [])
-            if series:
-                added += _carry_forward_to(
-                    series,
-                    market_end,
-                    include_target=True,
-                )
-
-        if added:
-            state["last_update"] = n.isoformat()
-
-    if added:
-        print(
-            f"[DIAG] Post-market OIC/CIO continuity backfill added {added} rows through 15:30",
-            flush=True,
-        )
-        # Persist the completed day once immediately.
-        try:
-            save_current_history()
-        except Exception as e:
-            print(f"[DIAG] Post-market backfill persist warning: {e}", flush=True)
-
-    return added
-
-
-def snapshot_worker():
-    """
-    Stage 7J:
-    Keep browser-facing live state fresh independently of Neon/local persistence.
-
-    The old worker called save_current_history() synchronously. A slow DB write
-    could therefore block the *only* snapshot loop and make charts appear frozen
-    even while WebSocket ticks continued to arrive. This worker never performs
-    database/network persistence.
-    """
-    print("[DIAG] Fast snapshot worker started (1s, non-blocking persistence)", flush=True)
-
-    while True:
-        started = time.time()
-        try:
-            if is_market_session():
-                make_snapshot()
-            else:
-                # If this deployment starts after market close, complete any
-                # missing OIC/CIO minutes through 15:30 from the last valid row.
-                backfill_oic_cio_to_market_close()
-        except Exception as e:
-            print(f"[DIAG] Snapshot ERROR: {e}", flush=True)
-
-        # Keep the live state near-real-time without busy-spinning on Render free.
-        elapsed = time.time() - started
-        time.sleep(max(0.20, 1.0 - elapsed))
-
-
-def persistence_worker():
-    """Persist today's accumulated state once per minute, off the live path."""
-    global last_persist_ist
-
-    print("[DIAG] Persistence worker started (60s)", flush=True)
-
-    # Small offset so persistence does not contend exactly on the minute boundary.
-    time.sleep(5)
-
-    while True:
-        started = time.time()
-        try:
-            if is_market_session():
-                save_current_history()
-                last_persist_ist = now_ist().isoformat()
-        except Exception as e:
-            print(f"[DIAG] Persistence ERROR: {e}", flush=True)
-
-        elapsed = time.time() - started
-        time.sleep(max(2.0, 60.0 - elapsed))
-
-
-def ensure_snapshot_worker():
-    global snapshot_thread_started
-    global persistence_thread_started
-
-    if not snapshot_thread_started:
-        snapshot_thread_started = True
-        threading.Thread(
-            target=snapshot_worker,
-            daemon=True,
-            name="live-snapshot",
-        ).start()
-
-    if not persistence_thread_started:
-        persistence_thread_started = True
-        threading.Thread(
-            target=persistence_worker,
-            daemon=True,
-            name="history-persistence",
-        ).start()
-
-
-# ============================================================
-# WEBSOCKET
-# ============================================================
-
-def on_ticks(ws, ticks):
-    global latest_nifty
-    global nifty_minute_bucket
-    global premium_minute_buckets
-    global latest_vix
-    global tick_counter
-    global oi_tick_counter
-    global last_live_tick_ts
-    global last_live_tick_ist
-
-    # Stage 7I: actual received ticks are the authoritative health signal.
-    # Native KiteTicker reconnect can resume tick delivery after an unclean
-    # close even when a prior close callback left state["connected"] = False.
-    # If ticks are arriving, the feed is live and snapshotting must continue.
-    last_live_tick_ts = time.time()
-    last_live_tick_ist = now_ist().isoformat()
-    tick_counter += len(ticks)
-
-    with lock:
-        state["connected"] = True
-        state["message"] = "LIVE — Zerodha ticks active"
-        state["last_update"] = last_live_tick_ist
-
-    option_oi_in_batch = 0
-
-    for q in ticks:
-        token = int(
-            q.get(
-                "instrument_token",
-                0,
-            )
-        )
-
-        # NIFTY
-        if token == nifty_token:
-            price = q.get(
-                "last_price"
-            )
-
-            ohlc = q.get(
-                "ohlc"
-            ) or {}
-
-            open_price = ohlc.get(
-                "open"
-            )
-
-            high = ohlc.get(
-                "high"
-            )
-
-            low = ohlc.get(
-                "low"
-            )
-
-            previous_close = ohlc.get(
-                "close"
-            )
-
+        nq = quotes.get("NSE:NIFTY 50") or {}
+        ohlc = nq.get("ohlc") or {}
+        price = nq.get("last_price")
+        with lock:
             if price is not None:
-                latest_nifty[
-                    "price"
-                ] = float(price)
+                state["nifty"]["price"] = float(price)
+            for a, b in (("open","open"),("high","high"),("low","low"),("close","previous_close")):
+                if ohlc.get(a) is not None:
+                    state["nifty"][b] = float(ohlc[a])
 
-                # Build true minute OHLC from each live NIFTY tick.
-                update_nifty_minute_ohlc(price)
+        for q in quotes.values():
+            token = int(q.get("instrument_token") or 0)
+            if token in token_meta and q.get("oi") is not None:
+                latest_oi[token] = int(q["oi"])
 
-            if open_price is not None:
-                latest_nifty[
-                    "open"
-                ] = float(open_price)
+        n = state["nifty"]
+        if state.get("opening_atm") is None and n.get("open") is not None:
+            state["opening_atm"] = round_to_100(n["open"])
+            lock_strikes(kite)
 
-            if high is not None:
-                latest_nifty[
-                    "high"
-                ] = float(high)
-
-            if low is not None:
-                latest_nifty[
-                    "low"
-                ] = float(low)
-
-            if previous_close is not None:
-                latest_nifty[
-                    "previous_close"
-                ] = float(
-                    previous_close
-                )
-
-            p = latest_nifty.get(
-                "price"
-            )
-
-            pc = latest_nifty.get(
-                "previous_close"
-            )
-
-            op = latest_nifty.get(
-                "open"
-            )
-
-            if p is not None and pc:
-                latest_nifty[
-                    "change"
-                ] = round(
-                    p - pc,
-                    2,
-                )
-
-                latest_nifty[
-                    "change_pct"
-                ] = round(
-                    ((p - pc) / pc) * 100,
-                    3,
-                )
-
-            with lock:
-                state["nifty"] = dict(
-                    latest_nifty
-                )
-
-            # Self-heal locked OIC/premium mappings if the process restarted
-            # or mapping initialization was missed.
-            if len(oic_tokens) != 3 or len(premium_token_map) != 6:
-                ensure_locked_strike_mappings()
-
-            if (
-                state.get("opening_atm")
-                is None
-                and op is not None
-            ):
-                atm = round_to_100(op)
-
-                with lock:
-                    state["opening_atm"] = atm
-
-                    state[
-                        "zone"
-                    ] = calculate_zone(
-                        op,
-                        pc,
-                    )
-
-                lock_oic_strikes()
-
-            elif op is not None and pc:
-                with lock:
-                    state[
-                        "zone"
-                    ] = calculate_zone(
-                        op,
-                        pc,
-                    )
-
-        # VIX
-        elif token == vix_token:
-            price = q.get(
-                "last_price"
-            )
-
-            if price is not None:
-                value = float(price)
-
-                band, interpretation = (
-                    classify_vix(value)
-                )
-
-                latest_vix = {
-                    "price": value,
-                    "range": band,
-                    "interpretation": interpretation,
-                }
-
-                with lock:
-                    state["vix"] = dict(
-                        latest_vix
-                    )
-
-        # OPTION PREMIUM (six locked strikes only)
-        if token in premium_token_map:
-            premium_price = q.get("last_price")
-            premium_oi = q.get("oi")
-            if premium_price is not None:
-                update_premium_lightweight(token, premium_price, premium_oi)
-
-        # OPTION OI
-        if token in token_meta:
-            oi = q.get("oi")
-
-            if oi is not None:
-                latest_oi[
-                    token
-                ] = int(oi)
-
-                oi_tick_counter += 1
-                option_oi_in_batch += 1
-
-    if option_oi_in_batch:
-        print(
-            f"[DIAG] OI batch={option_oi_in_batch}, unique={len(latest_oi)}",
-            flush=True,
-        )
-
-    with lock:
-        state["last_update"] = (
-            now_ist().isoformat()
-        )
-
-
-def on_connect(ws, response):
-    tokens = []
-
-    if nifty_token:
-        tokens.append(nifty_token)
-
-    if vix_token:
-        tokens.append(vix_token)
-
-    tokens.extend(
-        token_meta.keys()
-    )
-
-    tokens = list(set(tokens))
-
-    print(
-        f"[DIAG] WebSocket connected. Subscribing {len(tokens)} tokens.",
-        flush=True,
-    )
-
-    if tokens:
-        ws.subscribe(tokens)
-
-        ws.set_mode(
-            ws.MODE_FULL,
-            tokens,
-        )
-
-    with lock:
-        state["connected"] = True
-        state["message"] = (
-            "LIVE — Zerodha connected"
-        )
-
-
-def on_close(ws, code, reason):
-    # Ignore a late close callback from an older ticker after a reconnect.
-    if ws is not ticker:
-        print("[DIAG] Ignoring stale WebSocket close callback", flush=True)
-        return
-    print(
-        f"[DIAG] WebSocket closed {code} {reason}",
-        flush=True,
-    )
-
-    with lock:
-        state["connected"] = False
-        state["message"] = (
-            f"Disconnected — {reason or code}"
-        )
-
-
-def on_error(ws, code, reason):
-    # Ignore errors from a ticker instance that has already been replaced.
-    if ws is not ticker:
-        return
-    print(
-        f"[DIAG] WebSocket ERROR {code} {reason}",
-        flush=True,
-    )
-
-    with lock:
-        state["message"] = (
-            f"WebSocket error ({code}) — {reason}"
-        )
-
-
-# ============================================================
-# START LIVE
-# ============================================================
-
-def start_live(access_token):
-    global kite
-    global ticker
-    global baseline_ready
-
-    # Stage 7F: serialize the ENTIRE reconnect operation.  Previously the
-    # mutex ended before the new KiteTicker was created, allowing the
-    # watchdog/browser/startup restore to overlap and replace each other.
-    acquired = live_start_mutex.acquire(timeout=8)
-    if not acquired:
-        print("[KITE] Feed-start mutex busy >8s; forcing fresh callback-owned startup.", flush=True)
-    try:
-        print("[DIAG] start_live() called", flush=True)
-
+        ts = now_ist().isoformat()
         with lock:
-            state["date"] = today_key()
-            state["message"] = "Starting Zerodha live feed..."
-            state["connected"] = False
-
-        old_ticker = ticker
-        ticker = None
-        if old_ticker is not None:
-            try:
-                # Detach callbacks before closing so the old socket cannot
-                # mark the newly-created connection as disconnected.
-                old_ticker.on_close = None
-                old_ticker.on_error = None
-                old_ticker.close()
-            except Exception:
-                pass
-
-        new_kite = KiteConnect(api_key=KITE_API_KEY)
-        new_kite.set_access_token(access_token)
-        new_kite.profile()
-        discover_instruments(new_kite)
-        kite = new_kite
-
-        ensure_locked_strike_mappings(kite)
-
-        # CLEAN V2.6: do not wait for a daemon worker before OIC can begin.
-        # Populate latest_oi synchronously as part of a successful Kite startup.
-        initial_oi_count = poll_rest_market(force=True)
-        print(
-            f"[KITE] CLEAN V2.6 initial REST OI={initial_oi_count}, unique={len(latest_oi)}",
-            flush=True,
-        )
-
-        baseline_ready = False
-
-        if not baseline_thread_started:
-            threading.Thread(target=build_oi_baseline, daemon=True).start()
-
-        # Stage 7O: REST Quote is the primary authoritative live feed.
-        ticker = None
-
-        ensure_snapshot_worker()
-        ensure_rest_backup_worker()
-
-        with lock:
-            state["message"] = "Starting CLEAN V1 REST live feed..."
-            state["connected"] = False
-
-        print("[KITE] CLEAN V1 REST primary feed initialized.", flush=True)
-    finally:
-        if acquired:
-            try:
-                live_start_mutex.release()
-            except RuntimeError:
-                pass
-
-def _rest_quote_symbols():
-    """All instruments needed for a complete live fallback in one Quote request."""
-    symbols = ["NSE:NIFTY 50", "NSE:INDIA VIX"]
-    symbols.extend(f"NFO:{meta['symbol']}" for meta in token_meta.values())
-    return symbols
-
-def _apply_rest_quotes(quotes):
-    """Apply REST Quote payload without pretending it was a WebSocket tick."""
-    global latest_nifty, latest_vix, last_rest_quote_ts, last_rest_quote_ist
-    global last_oic_quote_ts, last_oic_quote_ist
-    option_updates = 0
-    oic_updated_tokens = set()
-    locked_oic_tokens = {
-        int(tok)
-        for legs in oic_tokens.values()
-        for tok in (legs or {}).values()
-        if tok is not None
-    }
-    for key, q in (quotes or {}).items():
-        token = int(q.get("instrument_token") or 0)
-        if token == nifty_token or key == "NSE:NIFTY 50":
-            price = q.get("last_price")
-            ohlc = q.get("ohlc") or {}
-            if price is not None:
-                latest_nifty["price"] = float(price)
-                update_nifty_minute_ohlc(price)
-            for src_key, dst_key in (("open","open"),("high","high"),("low","low"),("close","previous_close")):
-                if ohlc.get(src_key) is not None:
-                    latest_nifty[dst_key] = float(ohlc[src_key])
-            p, pc = latest_nifty.get("price"), latest_nifty.get("previous_close")
-            if p is not None and pc:
-                latest_nifty["change"] = round(p-pc,2)
-                latest_nifty["change_pct"] = round(((p-pc)/pc)*100,3)
-            with lock:
-                state["nifty"] = dict(latest_nifty)
-        elif token == vix_token or key == "NSE:INDIA VIX":
-            if q.get("last_price") is not None:
-                latest_vix["price"] = float(q["last_price"])
-                with lock:
-                    state["vix"] = dict(latest_vix)
-        if token in token_meta:
-            oi = q.get("oi")
-            if oi is not None:
-                latest_oi[token] = int(oi)
-                option_updates += 1
-                if token in locked_oic_tokens:
-                    oic_updated_tokens.add(token)
-            if token in premium_token_map and q.get("last_price") is not None:
-                update_premium_lightweight(token, q.get("last_price"), oi)
-
-    last_rest_quote_ts = time.time()
-    last_rest_quote_ist = now_ist().isoformat()
-
-    # Only mark OIC fresh when the REST payload actually contained OI for all
-    # currently locked CE/PE legs. This prevents spot/VIX-only responses from
-    # advancing the green LIVE timestamp while OIC charts are frozen.
-    if locked_oic_tokens and locked_oic_tokens.issubset(oic_updated_tokens):
-        last_oic_quote_ts = last_rest_quote_ts
-        last_oic_quote_ist = last_rest_quote_ist
-
-    with lock:
-        state["last_update"] = last_rest_quote_ist
-        if locked_oic_tokens and locked_oic_tokens.issubset(oic_updated_tokens):
-            state["message"] = "LIVE — Zerodha REST primary"
-        else:
-            missing = len(locked_oic_tokens - oic_updated_tokens) if locked_oic_tokens else 0
-            state["message"] = f"LIVE spot — OI waiting ({missing} locked legs missing)"
-    return option_updates
-
-def poll_rest_market(force=False):
-    """Fetch one complete Zerodha quote snapshot safely.
-
-    All REST quote callers share this function so only one request can be in
-    flight and requests are spaced safely. A successful call must populate
-    current OI for the nearest-expiry option universe before OIC snapshots run.
-    """
-    global rest_fallback_active
-    global rest_quote_errors
-    global last_rest_attempt_ts
-
-    if not is_market_session() or kite is None or not token_meta:
-        rest_fallback_active = False
-        return 0
-
-    now_ts = time.time()
-
-    # Normal polling interval is ~2 seconds. Startup can force the first call.
-    if not force and last_rest_attempt_ts and (now_ts - last_rest_attempt_ts) < 1.8:
-        return len(latest_oi)
-
-    acquired = rest_poll_lock.acquire(timeout=8 if force else 0.05)
-    if not acquired:
-        return len(latest_oi)
-
-    try:
-        now_ts = time.time()
-        if not force and last_rest_attempt_ts and (now_ts - last_rest_attempt_ts) < 1.8:
-            return len(latest_oi)
-
-        last_rest_attempt_ts = now_ts
-        rest_fallback_active = True
-
-        quotes = kite.quote(_rest_quote_symbols())
-        count = _apply_rest_quotes(quotes)
-
-        rest_quote_errors = 0
-        with lock:
-            state["connected"] = True
-            state["message"] = "LIVE — Zerodha REST primary"
-
-        print(
-            f"[KITE] CLEAN V2.6 REST live; OI contracts={count}, unique={len(latest_oi)}",
-            flush=True,
-        )
-        return count
-
-    except Exception as e:
-        rest_quote_errors += 1
-        with lock:
-            state["connected"] = False
-            state["message"] = f"REST live feed warning ({type(e).__name__})"
-
-        print(
-            f"[KITE] CLEAN V2.6 REST warning: {type(e).__name__}: {e}",
-            flush=True,
-        )
-        return 0
-
-    finally:
-        rest_poll_lock.release()
-
-
-def rest_backup_worker():
-    """Continuous primary REST feed with a single synchronized request owner."""
-    global rest_fallback_active
-    print("[KITE] CLEAN V2.6 REST PRIMARY worker started", flush=True)
-
-    while True:
-        try:
-            if is_market_session():
-                poll_rest_market(force=False)
-            else:
-                rest_fallback_active = False
-        except Exception as e:
-            print(f"[KITE] CLEAN V2.6 worker warning: {e}", flush=True)
-
-        # poll_rest_market itself enforces the request interval.
-        time.sleep(0.5)
-
-
-def ensure_rest_backup_worker():
-    global rest_backup_started
-
-    if rest_backup_started:
-        return
-
-    rest_backup_started = True
-    threading.Thread(
-        target=rest_backup_worker,
-        daemon=True,
-        name="kite-rest-primary",
-    ).start()
-
-
-def reconnect_watchdog():
-    """Stage 7H: observe WebSocket health; do not kill the worker.
-
-    KiteTicker native reconnect remains enabled. If it silently stalls, the REST
-    backup worker keeps OI/NIFTY/premium data moving until WebSocket ticks resume.
-    """
-    print("[KITE] Stage 7H hybrid-feed watchdog started", flush=True)
-    while True:
-        try:
-            if is_market_session():
-                age = (time.time() - last_live_tick_ts) if last_live_tick_ts else None
-                if age is not None and age > 8 and not rest_fallback_active:
-                    with lock:
-                        state["message"] = f"WebSocket stale {age:.0f}s — starting REST backup..."
-        except Exception as e:
-            print(f"[KITE] Stage 7H watchdog error: {e}", flush=True)
-        time.sleep(3)
-
-
-def ensure_reconnect_watchdog():
-    global reconnect_watchdog_started
-    if reconnect_watchdog_started:
-        return
-    reconnect_watchdog_started = True
-    threading.Thread(
-        target=reconnect_watchdog,
-        daemon=True,
-        name="kite-reconnect-watchdog",
-    ).start()
-
-
-# ============================================================
-# RESTORE TODAY
-# ============================================================
-
-def restore_today_history():
-    day = today_key()
-
-    saved = load_day_history(day)
-
-    series = saved.get(
-        "series"
-    ) or {}
-
-    with lock:
-        state["date"] = day
-
-        for key in (
-            "nifty",
-            "atm",
-            "minus100",
-            "plus100",
-            "cio",
-        ):
-            if isinstance(
-                series.get(key),
-                list,
-            ):
-                state[
-                    "series"
-                ][key] = series[key]
-
-        premium_series = series.get("premium") or {}
-        for premium_key in ("minus100", "atm", "plus100"):
-            legs = premium_series.get(premium_key) or {}
-            for option_type in ("CE", "PE"):
-                rows = legs.get(option_type) or []
-                if isinstance(rows, list):
-                    state["series"]["premium"][premium_key][option_type] = rows
-
-        saved_premium = saved.get("premium") or {}
-        for premium_key in ("minus100", "atm", "plus100"):
-            saved_value = saved_premium.get(premium_key)
-            # CLEAN V1 normalizes old chart-era scalar values.
-            state["premium"][premium_key] = saved_value if isinstance(saved_value, dict) else {}
-
-        if saved.get(
-            "opening_atm"
-        ):
-            state[
-                "opening_atm"
-            ] = saved[
-                "opening_atm"
-            ]
-
-        if saved.get("expiry"):
-            state["expiry"] = saved[
-                "expiry"
-            ]
-
-        if saved.get("zone"):
-            state["zone"] = saved[
-                "zone"
-            ]
-
-        if saved.get("nifty"):
-            state["nifty"] = saved[
-                "nifty"
-            ]
-
-        if saved.get("vix"):
-            state["vix"] = saved[
-                "vix"
-            ]
-
-        saved_strategies = saved.get("strategies") or {}
-        for strategy_name in ("S1", "S2", "PNA"):
-            strategy_data = saved_strategies.get(strategy_name) or {}
-            trades = strategy_data.get("trades") or []
-            if isinstance(trades, list):
-                state["strategies"][strategy_name]["trades"] = trades
-            state["strategies"][strategy_name]["active"] = strategy_data.get("active")
-            signals = strategy_data.get("signals") or []
-            if isinstance(signals, list):
-                state["strategies"][strategy_name]["signals"] = signals
-        saved_engine = saved.get("strategy_engine") or {}
-        if isinstance(saved_engine, dict):
-            state["strategy_engine"].update(saved_engine)
-
-def repair_strategy_exit_cutoff():
-    """Repair legacy rows whose exit was stamped after the locked 14:45 market cutoff."""
-    cutoff_price = _strategy_price_at_or_before(STRATEGY_LAST_EXIT_MINUTE)
-    if cutoff_price is None:
-        return
-    for strategy_name in ("S1", "S2", "PNA"):
-        s = state.get("strategies", {}).get(strategy_name, {})
-        for trade in s.get("trades", []) or []:
-            exit_m = _row_minutes(trade.get("exit_time"))
-            if exit_m is None or exit_m <= STRATEGY_LAST_EXIT_MINUTE:
-                continue
-            entry = trade.get("entry_level")
-            try:
-                entry = float(entry)
-            except Exception:
-                continue
-            points = cutoff_price - entry if trade.get("type") == "PE" else entry - cutoff_price
-            trade["exit_time"] = "14:45"
-            trade["exit_timestamp"] = None
-            trade["exit_level"] = round(cutoff_price, 2)
-            trade["points"] = round(points, 2)
-            trade["result"] = "WIN" if points > 0 else ("LOSS" if points < 0 else "FLAT")
-            trade["exit_reason"] = "14:45 TIME EXIT"
-        active = s.get("active")
-        if active:
-            # CLEAN V2.2:
-            # If today's restored strategy is still OPEN after the locked
-            # 14:45 cutoff, close it immediately using only the recorded
-            # NIFTY price at/before 14:45. Never use server/browser time.
-            entry = active.get("entry_level")
-            try:
-                entry = float(entry)
-            except Exception:
-                entry = None
-
-            if entry is not None:
-                points = (
-                    cutoff_price - entry
-                    if active.get("type") == "PE"
-                    else entry - cutoff_price
-                )
-
-                active["exit_time"] = "14:45"
-                active["exit_timestamp"] = None
-                active["exit_level"] = round(cutoff_price, 2)
-                active["points"] = round(points, 2)
-                active["sl_hit"] = False
-                active["result"] = (
-                    "WIN" if points > 0
-                    else ("LOSS" if points < 0 else "FLAT")
-                )
-                active["exit_reason"] = "14:45 TIME EXIT"
-
-                # Move the restored active trade into completed trades.
-                s.setdefault("trades", []).append(dict(active))
-                s["active"] = None
-
-                # Add a matching EXIT marker for chart/report consistency.
-                s.setdefault("signals", []).append({
-                    "time": "14:45",
-                    "timestamp": None,
-                    "strategy": strategy_name,
-                    "action": "EXIT",
-                    "option_type": active.get("type"),
-                    "nifty_level": round(cutoff_price, 2),
-                    "reason": "14:45 TIME EXIT",
+            # NIFTY minute close for Excel + strategy cutoff reference
+            if n.get("price") is not None:
+                p = float(n["price"])
+                append_or_replace(state["series"]["nifty"], {
+                    "time": minute_label(),
+                    "timestamp": ts,
+                    "open": p, "high": p, "low": p, "close": p, "price": p
                 })
 
+            fresh = True
+            for key, legs in locked.items():
+                ce = latest_oi.get(legs["CE"])
+                pe = latest_oi.get(legs["PE"])
+                if ce is None or pe is None:
+                    fresh = False
+                    continue
+                append_or_replace(state["series"][key], {
+                    "time": minute_label(), "timestamp": ts,
+                    "ce": int(ce), "pe": int(pe), "source": "LIVE"
+                })
 
-init_db()
-restore_today_history()
-repair_strategy_exit_cutoff()
-backfill_oic_cio_to_market_close()
-refresh_history_dates()
-# Important for free Render: when GitHub Actions wakes/restarts the service,
-# reconnect to Kite from today's Neon-persisted token without requiring the
-# dashboard to be opened in a browser.
-restore_kite_session()
-ensure_snapshot_worker()
+            if baseline_ready:
+                ce, pe = cio_totals()
+                append_or_replace(state["series"]["cio"], {
+                    "time": minute_label(), "timestamp": ts,
+                    "ce": int(ce), "pe": int(pe), "source": "LIVE"
+                })
 
+            if fresh and baseline_ready:
+                evaluate_strategies()
 
-# ============================================================
-# ROUTES
-# ============================================================
+            state["date"] = today_key()
+            state["connected"] = True
+            state["message"] = "LIVE — Zerodha REST"
+            state["last_update"] = ts
 
-# ============================================================
-# PORTAL AUTHENTICATION
-# ============================================================
+    except Exception as e:
+        with lock:
+            state["connected"] = False
+            state["message"] = f"Feed warning: {type(e).__name__}"
+        print(f"[POLL] {type(e).__name__}: {e}", flush=True)
+    finally:
+        rest_lock.release()
 
-def portal_login_configured():
-    return bool(PORTAL_USERNAME and PORTAL_PASSWORD)
+def worker():
+    while True:
+        try:
+            poll_once()
+        except Exception as e:
+            print(f"[WORKER] {e}", flush=True)
+        time.sleep(0.5)
 
+def start_worker():
+    global worker_started
+    if worker_started:
+        return
+    worker_started = True
+    threading.Thread(target=worker, daemon=True).start()
 
-def portal_authenticated():
-    return bool(session.get("portal_authenticated"))
+def start_live(token):
+    global kite, access_token, baseline_ready
+    k = KiteConnect(api_key=KITE_API_KEY)
+    k.set_access_token(token)
+    k.profile()
+    discover(k)
+    kite = k
+    access_token = token
 
+    with lock:
+        state["date"] = today_key()
+        state["connected"] = True
+        state["message"] = "Zerodha login accepted — starting feed"
 
-@app.before_request
-def require_portal_login():
-    # Login page, static assets and health check stay public.
-    if request.endpoint in {"portal_login", "static", "health", "kite_callback"}:
-        return None
+    lock_strikes(k)
+    baseline_ready = False
+    threading.Thread(target=build_baseline, daemon=True).start()
+    start_worker()
 
-    if not portal_authenticated():
-        next_url = request.full_path if request.query_string else request.path
-        return redirect(url_for("portal_login", next=next_url))
-
-    return None
-
-
-@app.route("/login", methods=["GET", "POST"])
-def portal_login():
-    if portal_authenticated():
-        return redirect(url_for("index"))
-
-    error = None
-    configured = portal_login_configured()
-
-    if request.method == "POST":
-        if not configured:
-            error = "Portal login is not configured on the server."
-        else:
-            username = request.form.get("username", "").strip()
-            password = request.form.get("password", "")
-
-            user_ok = hmac.compare_digest(username, PORTAL_USERNAME)
-            pass_ok = hmac.compare_digest(password, PORTAL_PASSWORD)
-
-            if user_ok and pass_ok:
-                session.clear()
-                session["portal_authenticated"] = True
-                session["portal_username"] = PORTAL_USERNAME
-                session.permanent = request.form.get("remember") == "on"
-
-                next_url = request.args.get("next", "")
-                if not next_url.startswith("/") or next_url.startswith("//"):
-                    next_url = url_for("index")
-                return redirect(next_url)
-
-            error = "Invalid username or password."
-
-    return render_template(
-        "login.html",
-        error=error,
-        configured=configured,
-    )
-
-
-@app.route("/logout")
-def portal_logout():
-    session.clear()
-    return redirect(url_for("portal_login"))
-
+@app.after_request
+def no_cache(resp):
+    if request.path.startswith("/api/") or request.path == "/health":
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return resp
 
 @app.route("/")
 def index():
-    if (
-        not KITE_API_KEY
-        or not KITE_API_SECRET
-    ):
-        return render_template(
-            "index.html",
-            configured=False,
-            base_url=PUBLIC_BASE_URL,
-        )
-
-    # Stage 7K:
-    # NEVER restart Kite from a normal dashboard page request.
-    #
-    # Previously every GET / request did:
-    #   load_access_token() -> if state["connected"] is False -> start_live()
-    #
-    # start_live() intentionally closes/replaces the existing ticker before
-    # creating a new one. During a transient 1006/reconnect window the flag can
-    # be False even though KiteTicker is already reconnecting. Any browser,
-    # uptime probe or repeated page request could therefore tear down the ticker
-    # again and restart full instrument discovery. Render logs showed exactly
-    # this loop ("Restored today's access token" + "Loading instruments") many
-    # times per hour.
-    #
-    # Feed startup is owned only by process startup restore_kite_session() and
-    # the explicit Zerodha callback after a fresh login.
-    return render_template(
-        "index.html",
-        configured=True,
-        base_url=PUBLIC_BASE_URL,
-    )
-
+    return render_template("index.html", configured=bool(KITE_API_KEY and KITE_API_SECRET))
 
 @app.route("/kite/login")
 def kite_login():
     if not KITE_API_KEY:
-        return (
-            "KITE_API_KEY is not configured",
-            400,
-        )
-
-    k = KiteConnect(
-        api_key=KITE_API_KEY
-    )
-
-    return redirect(
-        k.login_url()
-    )
-
+        return "KITE_API_KEY not configured", 400
+    return redirect(KiteConnect(api_key=KITE_API_KEY).login_url())
 
 @app.route("/kite/callback")
 def kite_callback():
-    request_token = request.args.get("request_token")
-
-    if not request_token:
-        return ("Zerodha did not return a request_token", 400)
-
-    try:
-        print("[KITE] Zerodha callback received.", flush=True)
-
-        k = KiteConnect(api_key=KITE_API_KEY)
-        kite_session = k.generate_session(
-            request_token,
-            api_secret=KITE_API_SECRET,
-        )
-
-        access_token = kite_session["access_token"]
-
-        # Persist first so a Render restart can restore the same valid
-        # same-day session without asking the user to log in again.
-        save_access_token(access_token)
-
-        with lock:
-            state["message"] = "Zerodha login accepted — starting live feed..."
-            state["connected"] = False
-
-        print("[KITE] Access token saved; calling start_live() synchronously.", flush=True)
-
-        # Stage 7N: start synchronously inside the callback.
-        # This removes ambiguity from a daemon thread that may never run,
-        # may lose ownership, or may fail after the HTTP redirect has
-        # already returned to the dashboard.
-        start_live(access_token)
-
-        print("[KITE] start_live() returned; waiting for WebSocket on_connect.", flush=True)
-
-        return redirect("/")
-
-    except Exception as e:
-        import traceback
-        print(
-            f"[KITE] CALLBACK FEED START ERROR: {type(e).__name__}: {e}",
-            flush=True,
-        )
-        traceback.print_exc()
-
-        # Keep today's saved token. A feed startup failure is not proof that
-        # the token is invalid.
-        with lock:
-            state["connected"] = False
-            state["message"] = (
-                f"Zerodha login OK — feed startup failed "
-                f"({type(e).__name__})"
-            )
-
-        return redirect("/")
-
-
-@app.route("/kite/logout")
-def kite_logout():
-    global ticker
-
-    try:
-        if ticker:
-            ticker.close()
-
-    except Exception as e:
-        print(
-            f"[DIAG] Ticker close error: {e}",
-            flush=True,
-        )
-
-    clear_access_token()
-
-    with lock:
-        state["connected"] = False
-        state["message"] = (
-            "Logged out — Zerodha login required"
-        )
-
+    token = request.args.get("request_token")
+    if not token:
+        return "Missing request_token", 400
+    k = KiteConnect(api_key=KITE_API_KEY)
+    s = k.generate_session(token, api_secret=KITE_API_SECRET)
+    start_live(s["access_token"])
     return redirect("/")
-
-
-
-def request_rest_refresh_if_due():
-    # CLEAN V1: background REST worker is the only market-data poller.
-    return False
-
-
-def _minute_number_from_label(label):
-    try:
-        hh, mm = str(label or "").split(":", 1)
-        return int(hh) * 60 + int(mm)
-    except Exception:
-        return None
-
-
-def _series_since(rows, since_minute):
-    """Return rows at/after the browser's last visible minute.
-
-    Including the matching minute is intentional: the current minute can be
-    replaced as fresh REST/WebSocket values arrive, so the browser needs the
-    latest version of that point as well as any newly-created minutes.
-    """
-    if not isinstance(rows, list):
-        return []
-    if since_minute is None:
-        return list(rows)
-    out = []
-    for row in rows:
-        m = _minute_number_from_label((row or {}).get("time"))
-        if m is None or m >= since_minute:
-            out.append(row)
-    return out
-
 
 @app.route("/api/state")
 def api_state():
-    # IMPORTANT: browser requests must never call Zerodha directly. Market-data
-    # collection belongs exclusively to the background REST/WebSocket workers.
-    # This keeps /api/state responsive even when Zerodha is temporarily slow.
     with lock:
         return jsonify(state)
 
-
-@app.route("/api/live/delta")
-def api_live_delta():
-    """Small incremental live payload for the browser.
-
-    The dashboard downloads the full intraday state only once. Subsequent
-    refreshes ask for rows at/after the last minute already present in the
-    browser and merge them locally. This avoids repeatedly sending the entire
-    growing trading-day history every few seconds.
-    """
-    since_raw = (request.args.get("since") or "").strip()
-    since_minute = _minute_number_from_label(since_raw) if since_raw else None
-
+@app.route("/api/download/cio")
+def download_excel():
     with lock:
-        src_series = state.get("series", {}) or {}
-        premium = src_series.get("premium", {}) or {}
-
-        delta = {
-            "configured": state.get("configured"),
-            "connected": state.get("connected"),
-            "message": state.get("message"),
-            "last_update": state.get("last_update"),
-            "date": state.get("date"),
+        s = {
+            "date": state.get("date") or today_key(),
             "expiry": state.get("expiry"),
-            "nifty": state.get("nifty", {}),
-            "vix": state.get("vix", {}),
-            "zone": state.get("zone", {}),
             "opening_atm": state.get("opening_atm"),
-            "oic": state.get("oic", {}),
-            "feed_health": state.get("feed_health", {}),
-            "strategies": state.get("strategies", {}),
-            "strategy_engine": state.get("strategy_engine", {}),
-            "history_dates": state.get("history_dates", []),
-            "series": {
-                "nifty": _series_since(src_series.get("nifty", []), since_minute),
-                "atm": _series_since(src_series.get("atm", []), since_minute),
-                "minus100": _series_since(src_series.get("minus100", []), since_minute),
-                "plus100": _series_since(src_series.get("plus100", []), since_minute),
-                "cio": _series_since(src_series.get("cio", []), since_minute),
-                "premium": {
-                    key: {
-                        opt: _series_since(
-                            ((premium.get(key) or {}).get(opt) or []),
-                            since_minute,
-                        )
-                        for opt in ("CE", "PE")
-                    }
-                    for key in ("minus100", "atm", "plus100")
-                },
-            },
+            "series": {k: list(state["series"].get(k, [])) for k in ("nifty","minus100","atm","plus100","cio")},
         }
-
-    return jsonify(delta)
-
-
-@app.route("/api/history/dates")
-def api_history_dates():
-    refresh_history_dates()
-
-    with lock:
-        return jsonify(
-            {
-                "dates": state[
-                    "history_dates"
-                ]
-            }
-        )
-
-
-@app.route("/api/history/<day>")
-def api_history_day(day):
-    if not history_exists(day):
-        return jsonify(
-            {
-                "error": (
-                    "No stored data for selected date."
-                )
-            }
-        ), 404
-
-    return jsonify(
-        load_day_history(day)
-    )
-
-
-@app.route("/api/history/<day>/cio")
-def api_history_cio(day):
-    # For today use current live memory.
-    if day == today_key():
-        with lock:
-            return jsonify(
-                {
-                    "date": day,
-                    "expiry": state.get(
-                        "expiry"
-                    ),
-                    "opening_atm": state.get(
-                        "opening_atm"
-                    ),
-                    "cio": list(
-                        state.get(
-                            "series",
-                            {},
-                        ).get(
-                            "cio",
-                            [],
-                        )
-                    ),
-                }
-            )
-
-    if not history_exists(day):
-        return jsonify(
-            {
-                "error": (
-                    "No stored data for selected date."
-                )
-            }
-        ), 404
-
-    data = load_day_history(day)
-
-    return jsonify(
-        {
-            "date": day,
-            "expiry": data.get(
-                "expiry"
-            ),
-            "opening_atm": data.get(
-                "opening_atm"
-            ),
-            "cio": data.get(
-                "series",
-                {},
-            ).get(
-                "cio",
-                [],
-            ),
-        }
-    )
-
-
-@app.route("/api/premium/<day>")
-def api_premium_day(day):
-    """Return the six recorded option-premium OHLC series for a session."""
-    if day == today_key():
-        with lock:
-                return jsonify({
-                "date": day,
-                "expiry": state.get("expiry"),
-                "opening_atm": state.get("opening_atm"),
-                "premium": state.get("premium", {}),
-                "series": state.get("series", {}).get("premium", {}),
-            })
-
-    if not history_exists(day):
-        return jsonify({"error": "No stored data for selected date."}), 404
-
-    data = load_day_history(day)
-    return jsonify({
-        "date": day,
-        "expiry": data.get("expiry"),
-        "opening_atm": data.get("opening_atm"),
-        "premium": data.get("premium", {}),
-        "series": (data.get("series", {}) or {}).get("premium", {}),
-    })
-
-
-# ============================================================
-# OIC + CIO + NIFTY EXCEL DOWNLOAD
-# Existing route is preserved for frontend compatibility.
-# ============================================================
-
-@app.route("/api/download/cio/<day>")
-def download_cio_excel(day):
-    if day == today_key():
-        with lock:
-            data = {
-                "date": day,
-                "expiry": state.get("expiry"),
-                "opening_atm": state.get("opening_atm"),
-                "series": {
-                    key: list(state.get("series", {}).get(key, []))
-                    for key in ("nifty", "minus100", "atm", "plus100", "cio")
-                },
-            }
-    else:
-        if not history_exists(day):
-            return jsonify({"error": "No stored data for selected date."}), 404
-        data = load_day_history(day)
-
-    series = data.get("series", {}) or {}
-    nifty_data = series.get("nifty", []) or []
-    minus100 = series.get("minus100", []) or []
-    atm = series.get("atm", []) or []
-    plus100 = series.get("plus100", []) or []
-    cio = series.get("cio", []) or []
-
-    if not any((nifty_data, minus100, atm, plus100, cio)):
-        return jsonify({"error": "No OIC/CIO/NIFTY data available for selected date."}), 404
 
     def by_time(rows):
-        return {str(p.get("time")): p for p in rows if p.get("time")}
-
-    maps = {
-        "nifty": by_time(nifty_data),
-        "minus100": by_time(minus100),
-        "atm": by_time(atm),
-        "plus100": by_time(plus100),
-        "cio": by_time(cio),
-    }
+        return {str(r.get("time")): r for r in rows if r.get("time")}
+    maps = {k: by_time(v) for k,v in s["series"].items()}
     all_times = sorted(set().union(*(m.keys() for m in maps.values())))
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "OIC + CIO + NIFTY"
-
+    ws.title = "NIFTY + OIC + CIO"
     ws["A1"] = "Pratik Analysis"
-    ws["A2"] = "NIFTY 1-Min OHLC + OIC + CIO — Minute-wise Data"
+    ws["A2"] = "NIFTY + OIC + CIO — Minute-wise Data"
     ws["A1"].font = Font(bold=True, size=16)
     ws["A2"].font = Font(bold=True, size=13)
-
-    ws["A4"] = "Date"
-    ws["B4"] = day
-    ws["A5"] = "NIFTY Opening ATM"
-    ws["B5"] = data.get("opening_atm")
-    ws["A6"] = "Nearest Expiry"
-    ws["B6"] = data.get("expiry")
-    ws["D4"] = "Data Quality"
-    ws["E4"] = "LIVE = genuine recorded minute"
-    ws["D5"] = "CARRIED FORWARD"
-    ws["E5"] = "Continuity only — last valid value repeated; exclude from strategy/backtest"
-    ws["D6"] = "INCOMPLETE"
-    ws["E6"] = "One or more OIC/CIO components missing"
+    ws["A4"] = "Date"; ws["B4"] = s["date"]
+    ws["A5"] = "Opening ATM"; ws["B5"] = s["opening_atm"]
+    ws["A6"] = "Expiry"; ws["B6"] = s["expiry"]
 
     headers = [
-        "Time",
-        "NIFTY Open",
-        "NIFTY High",
-        "NIFTY Low",
-        "NIFTY Close",
-        "ATM -100 CE OI",
-        "ATM -100 PE OI",
-        "ATM -100 Source",
-        "ATM CE OI",
-        "ATM PE OI",
-        "ATM Source",
-        "ATM +100 CE OI",
-        "ATM +100 PE OI",
-        "ATM +100 Source",
-        "CIO CE Negative Change in OI",
-        "CIO PE Negative Change in OI",
-        "CIO Source",
-        "Row Quality",
+        "Time","NIFTY Close",
+        "ATM -100 CE OI","ATM -100 PE OI",
+        "ATM CE OI","ATM PE OI",
+        "ATM +100 CE OI","ATM +100 PE OI",
+        "CIO CE Negative Change in OI","CIO PE Negative Change in OI",
     ]
-    header_row = 8
-    for col, value in enumerate(headers, 1):
-        cell = ws.cell(row=header_row, column=col, value=value)
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(horizontal="center")
+    for c,h in enumerate(headers,1):
+        ws.cell(8,c,h).font = Font(bold=True)
 
-    for row_no, t in enumerate(all_times, start=header_row + 1):
-        n = maps["nifty"].get(t, {})
-        m = maps["minus100"].get(t, {})
-        a = maps["atm"].get(t, {})
-        p = maps["plus100"].get(t, {})
-        c = maps["cio"].get(t, {})
-        # Older stored days may contain only ``price``.  For those rows,
-        # fall back to that value so historical downloads remain readable.
-        fallback_price = n.get("price")
-        def source_label(row):
-            if not row:
-                return "MISSING"
-            return "CARRIED FORWARD" if row.get("carried_forward") else "LIVE"
-
-        m_source = source_label(m)
-        a_source = source_label(a)
-        p_source = source_label(p)
-        c_source = source_label(c)
-
-        quality_sources = (m_source, a_source, p_source, c_source)
-        if "MISSING" in quality_sources:
-            row_quality = "INCOMPLETE"
-        elif "CARRIED FORWARD" in quality_sources:
-            row_quality = "CARRIED FORWARD"
-        else:
-            row_quality = "LIVE"
-
-        values = [
-            t,
-            n.get("open", fallback_price),
-            n.get("high", fallback_price),
-            n.get("low", fallback_price),
-            n.get("close", fallback_price),
-            m.get("ce"), m.get("pe"), m_source,
-            a.get("ce"), a.get("pe"), a_source,
-            p.get("ce"), p.get("pe"), p_source,
-            c.get("ce"), c.get("pe"), c_source,
-            row_quality,
-        ]
-        for col, value in enumerate(values, 1):
-            ws.cell(row=row_no, column=col, value=value)
+    for rno,t in enumerate(all_times,9):
+        n=maps["nifty"].get(t,{})
+        m=maps["minus100"].get(t,{})
+        a=maps["atm"].get(t,{})
+        p=maps["plus100"].get(t,{})
+        c=maps["cio"].get(t,{})
+        vals=[t,n.get("close",n.get("price")),m.get("ce"),m.get("pe"),a.get("ce"),a.get("pe"),p.get("ce"),p.get("pe"),c.get("ce"),c.get("pe")]
+        for col,val in enumerate(vals,1):
+            ws.cell(rno,col,val)
 
     ws.freeze_panes = "A9"
-    widths = [
-        14, 16, 16, 16, 16,
-        20, 20, 20,
-        20, 20, 20,
-        20, 20, 20,
-        32, 32, 20, 20,
-    ]
-    for i, width in enumerate(widths, 1):
-        ws.column_dimensions[chr(64+i)].width = width
+    for col in range(1, 11):
+        ws.column_dimensions[chr(64+col)].width = 24 if col > 2 else 16
 
-    output = BytesIO()
-    wb.save(output)
-    output.seek(0)
-    filename = f"Pratik_Analysis_NIFTY_OIC_CIO_{day}.xlsx"
+    buf = BytesIO()
+    wb.save(buf); buf.seek(0)
     return send_file(
-        output,
-        as_attachment=True,
-        download_name=filename,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        buf, as_attachment=True,
+        download_name=f"Pratik_NIFTY_OIC_CIO_{s['date']}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
-
-# ============================================================
-# STRATEGY REPORTS + EXCEL EXPORT
-# ============================================================
-
-def _parse_report_day(value):
-    try:
-        return datetime.strptime(str(value), "%Y-%m-%d").date()
-    except Exception:
-        return None
-
-
-def _strategy_trades_from_day(day, data):
-    strategies = (data or {}).get("strategies") or {}
-    rows = []
-
-    for strategy_name in ("S1", "S2", "PNA"):
-        strategy_data = strategies.get(strategy_name) or {}
-        trades = strategy_data.get("trades") or []
-
-        if not isinstance(trades, list):
-            continue
-
-        for i, trade in enumerate(trades, start=1):
-            if not isinstance(trade, dict):
-                continue
-
-            row = dict(trade)
-            row.setdefault("date", day)
-            row.setdefault("strategy", strategy_name)
-            row.setdefault("trade_no", i)
-            rows.append(row)
-
-    return rows
-
-
-def _report_days(start_day, end_day):
-    refresh_history_dates()
-    with lock:
-        available = list(state.get("history_dates", []))
-        today_has_data = bool(state.get("date") == today_key())
-
-    if today_has_data and today_key() not in available:
-        available.append(today_key())
-
-    selected = []
-    for day in available:
-        d = _parse_report_day(day)
-        if d and start_day <= d <= end_day:
-            selected.append(day)
-
-    return sorted(set(selected))
-
-
-def _collect_report(start_text, end_text):
-    start_day = _parse_report_day(start_text)
-    end_day = _parse_report_day(end_text)
-
-    if not start_day or not end_day:
-        return None, "Please select a valid From and To date."
-
-    if start_day > end_day:
-        return None, "From date cannot be after To date."
-
-    days = _report_days(start_day, end_day)
-    all_trades = []
-
-    for day in days:
-        if day == today_key():
-            with lock:
-                data = {
-                    "date": day,
-                    "strategies": json.loads(json.dumps(state.get("strategies", {}))),
-                }
-        else:
-            data = load_day_history(day)
-
-        all_trades.extend(_strategy_trades_from_day(day, data))
-
-    def num(value):
-        try:
-            return float(value)
-        except Exception:
-            return 0.0
-
-    summary = {}
-    for name in ("S1", "S2", "PNA"):
-        trades = [t for t in all_trades if str(t.get("strategy", "")).upper() == name]
-        completed = [t for t in trades if t.get("exit_time") or t.get("exit_level") is not None]
-        points = [num(t.get("points")) for t in completed]
-        wins = sum(1 for p in points if p > 0)
-        losses = sum(1 for p in points if p < 0)
-        flat = sum(1 for p in points if p == 0)
-        sl_hits = sum(1 for t in completed if bool(t.get("sl_hit")))
-        maes = [num(t.get("mae")) for t in completed if t.get("mae") is not None]
-        mfes = [num(t.get("mfe")) for t in completed if t.get("mfe") is not None]
-
-        summary[name] = {
-            "trades": len(completed),
-            "wins": wins,
-            "losses": losses,
-            "flat": flat,
-            "win_rate": round((wins / len(completed) * 100), 2) if completed else 0.0,
-            "total_points": round(sum(points), 2),
-            "avg_points": round((sum(points) / len(completed)), 2) if completed else 0.0,
-            "sl_hits": sl_hits,
-            "avg_mae": round((sum(maes) / len(maes)), 2) if maes else 0.0,
-            "avg_mfe": round((sum(mfes) / len(mfes)), 2) if mfes else 0.0,
-            "best_trade": round(max(points), 2) if points else 0.0,
-            "worst_trade": round(min(points), 2) if points else 0.0,
-        }
-
-    daywise = []
-    for day in days:
-        item = {"date": day}
-        for name in ("S1", "S2", "PNA"):
-            day_trades = [
-                t for t in all_trades
-                if t.get("date") == day
-                and str(t.get("strategy", "")).upper() == name
-                and (t.get("exit_time") or t.get("exit_level") is not None)
-            ]
-            item[f"{name}_trades"] = len(day_trades)
-            item[f"{name}_points"] = round(sum(num(t.get("points")) for t in day_trades), 2)
-        daywise.append(item)
-
-    return {
-        "from": start_text,
-        "to": end_text,
-        "days": days,
-        "summary": summary,
-        "daywise": daywise,
-        "trades": all_trades,
-    }, None
-
-
-@app.route("/api/reports")
-def api_strategy_reports():
-    start_text = request.args.get("from", "")
-    end_text = request.args.get("to", "")
-    report, error = _collect_report(start_text, end_text)
-    if error:
-        return jsonify({"error": error}), 400
-    return jsonify(report)
-
-
-@app.route("/api/download/reports")
-def download_strategy_reports_excel():
-    start_text = request.args.get("from", "")
-    end_text = request.args.get("to", "")
-    report, error = _collect_report(start_text, end_text)
-    if error:
-        return jsonify({"error": error}), 400
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Overall Summary"
-
-    title_font = Font(bold=True, size=16)
-    header_font = Font(bold=True)
-
-    ws["A1"] = "Pratik Analysis"
-    ws["A2"] = "S1 / S2 / PNA Strategy Performance Report"
-    ws["A1"].font = title_font
-    ws["A2"].font = Font(bold=True, size=13)
-    ws["A4"] = "From"
-    ws["B4"] = start_text
-    ws["C4"] = "To"
-    ws["D4"] = end_text
-
-    summary_headers = [
-        "Strategy", "Trades", "Wins", "Losses", "Flat", "Win %",
-        "Total Points", "Avg Points/Trade", "30-Point SL Hits",
-        "Avg MAE", "Avg MFE", "Best Trade", "Worst Trade",
-    ]
-    for col, value in enumerate(summary_headers, 1):
-        cell = ws.cell(row=6, column=col, value=value)
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center")
-
-    for row_no, name in enumerate(("S1", "S2", "PNA"), start=7):
-        m = report["summary"][name]
-        values = [
-            name, m["trades"], m["wins"], m["losses"], m["flat"], m["win_rate"],
-            m["total_points"], m["avg_points"], m["sl_hits"], m["avg_mae"],
-            m["avg_mfe"], m["best_trade"], m["worst_trade"],
-        ]
-        for col, value in enumerate(values, 1):
-            ws.cell(row=row_no, column=col, value=value)
-
-    ws_day = wb.create_sheet("Day-wise Summary")
-    day_headers = ["Date", "S1 Trades", "S1 Points", "S2 Trades", "S2 Points", "PNA Trades", "PNA Points"]
-    for col, value in enumerate(day_headers, 1):
-        c = ws_day.cell(row=1, column=col, value=value)
-        c.font = header_font
-    for row_no, d in enumerate(report["daywise"], start=2):
-        vals = [
-            d["date"], d["S1_trades"], d["S1_points"], d["S2_trades"],
-            d["S2_points"], d["PNA_trades"], d["PNA_points"],
-        ]
-        for col, value in enumerate(vals, 1):
-            ws_day.cell(row=row_no, column=col, value=value)
-
-    trade_headers = [
-        "Date", "Trade #", "Type", "Entry Time", "Entry Level", "30-Point SL",
-        "Exit Time", "Exit Level", "Points", "MAE", "MFE", "SL Hit?",
-        "Result", "Exit Reason", "Comments",
-    ]
-
-    for strategy_name in ("S1", "S2", "PNA"):
-        sheet = wb.create_sheet(f"{strategy_name} Trades")
-        for col, value in enumerate(trade_headers, 1):
-            c = sheet.cell(row=1, column=col, value=value)
-            c.font = header_font
-
-        rows = [t for t in report["trades"] if str(t.get("strategy", "")).upper() == strategy_name]
-        for row_no, t in enumerate(rows, start=2):
-            points = t.get("points")
-            result = t.get("result")
-            if not result and points is not None:
-                try:
-                    p = float(points)
-                    result = "WIN" if p > 0 else "LOSS" if p < 0 else "FLAT"
-                except Exception:
-                    result = ""
-
-            vals = [
-                t.get("date"), t.get("trade_no"), t.get("type") or t.get("side"),
-                t.get("entry_time"), t.get("entry_level"), t.get("sl_level"),
-                t.get("exit_time"), t.get("exit_level"), points, t.get("mae"),
-                t.get("mfe"), "YES" if t.get("sl_hit") else "NO", result,
-                t.get("exit_reason"), t.get("comments"),
-            ]
-            for col, value in enumerate(vals, 1):
-                sheet.cell(row=row_no, column=col, value=value)
-
-    risk = wb.create_sheet("Risk & SL")
-    risk_headers = ["Strategy", "Trades", "30-Point SL Hits", "Avg MAE", "Avg MFE", "Best Trade", "Worst Trade"]
-    for col, value in enumerate(risk_headers, 1):
-        c = risk.cell(row=1, column=col, value=value)
-        c.font = header_font
-    for row_no, name in enumerate(("S1", "S2", "PNA"), start=2):
-        m = report["summary"][name]
-        vals = [name, m["trades"], m["sl_hits"], m["avg_mae"], m["avg_mfe"], m["best_trade"], m["worst_trade"]]
-        for col, value in enumerate(vals, 1):
-            risk.cell(row=row_no, column=col, value=value)
-
-    for sheet in wb.worksheets:
-        sheet.freeze_panes = "A2" if sheet.title != "Overall Summary" else "A6"
-        for column_cells in sheet.columns:
-            max_len = 0
-            letter = column_cells[0].column_letter
-            for cell in column_cells:
-                try:
-                    max_len = max(max_len, len(str(cell.value or "")))
-                except Exception:
-                    pass
-            sheet.column_dimensions[letter].width = min(max(max_len + 2, 11), 30)
-
-    buffer = BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-
-    filename = f"Pratik_Analysis_Strategy_Report_{start_text}_to_{end_text}.xlsx"
-    return send_file(
-        buffer,
-        as_attachment=True,
-        download_name=filename,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-
-
-# ============================================================
-# OPTION PREMIUM PERFORMANCE + EXCEL EXPORT
-# ============================================================
-
-PREMIUM_KEYS = ("minus100", "atm", "plus100")
-PREMIUM_LABELS = {
-    "minus100": "ATM -100",
-    "atm": "ATM",
-    "plus100": "ATM +100",
-}
-
-
-def _normalise_hhmm(value):
-    """Return HH:MM from common stored time formats."""
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    # ISO datetime
-    if "T" in text:
-        try:
-            return datetime.fromisoformat(text.replace("Z", "+00:00")).strftime("%H:%M")
-        except Exception:
-            pass
-    # HH:MM[:SS] or labels containing a time
-    import re
-    m = re.search(r"(?:^|\s)(\d{1,2}):(\d{2})(?::\d{2})?", text)
-    if m:
-        try:
-            hh = int(m.group(1)); mm = int(m.group(2))
-            if 0 <= hh <= 23 and 0 <= mm <= 59:
-                return f"{hh:02d}:{mm:02d}"
-        except Exception:
-            pass
-    return None
-
-
-def _trade_option_type(trade):
-    """Map strategy trade direction to the sold option leg (CE or PE)."""
-    values = [
-        trade.get("type"), trade.get("side"), trade.get("signal"),
-        trade.get("option_type"), trade.get("direction"),
-    ]
-    text = " ".join(str(v or "") for v in values).upper()
-    if "PE" in text:
-        return "PE"
-    if "CE" in text:
-        return "CE"
-    return None
-
-
-def _series_for_premium(data, key, option_type):
-    return ((((data or {}).get("series") or {}).get("premium") or {}).get(key) or {}).get(option_type) or []
-
-
-def _candle_by_minute(series):
-    result = {}
-    for p in series or []:
-        if not isinstance(p, dict):
-            continue
-        hhmm = _normalise_hhmm(p.get("time") or p.get("timestamp"))
-        if hhmm:
-            result[hhmm] = p
-    return result
-
-
-def _premium_trade_metrics(trade, day_data, key, option_type):
-    """Calculate sold-option performance from stored 1-minute OHLC.
-
-    Entry/exit use the candle close at the strategy entry/exit minute. This is the
-    most precise reproducible value available from the stored 1-minute premium
-    history. MAE/MFE use minute highs/lows while the strategy trade is open.
-    """
-    series = _series_for_premium(day_data, key, option_type)
-    if not series:
-        return None
-
-    entry_time = _normalise_hhmm(trade.get("entry_time") or trade.get("entry_timestamp"))
-    exit_time = _normalise_hhmm(trade.get("exit_time") or trade.get("exit_timestamp"))
-    if not entry_time or not exit_time:
-        return None
-
-    by_minute = _candle_by_minute(series)
-    entry_candle = by_minute.get(entry_time)
-    exit_candle = by_minute.get(exit_time)
-    if not entry_candle or not exit_candle:
-        return None
-
-    def f(value):
-        try:
-            n = float(value)
-            return n if math.isfinite(n) else None
-        except Exception:
-            return None
-
-    entry = f(entry_candle.get("close", entry_candle.get("ltp")))
-    exit_ = f(exit_candle.get("close", exit_candle.get("ltp")))
-    if entry is None or exit_ is None:
-        return None
-
-    window = []
-    for p in series:
-        t = _normalise_hhmm(p.get("time") or p.get("timestamp"))
-        if t and entry_time <= t <= exit_time:
-            window.append(p)
-
-    highs = [f(p.get("high")) for p in window]
-    lows = [f(p.get("low")) for p in window]
-    highs = [v for v in highs if v is not None]
-    lows = [v for v in lows if v is not None]
-
-    highest = max(highs) if highs else max(entry, exit_)
-    lowest = min(lows) if lows else min(entry, exit_)
-
-    # All tracked strategy legs are option SELLs.
-    premium_points = entry - exit_
-    premium_pct = (premium_points / entry * 100.0) if entry else 0.0
-    mae = max(0.0, highest - entry)   # premium rise is adverse for a seller
-    mfe = max(0.0, entry - lowest)    # premium fall is favourable for a seller
-
-    strike = None
-    for c in (entry_candle, exit_candle):
-        try:
-            if c.get("strike") is not None:
-                strike = int(float(c.get("strike")))
-                break
-        except Exception:
-            pass
-    if strike is None:
-        premium_map = (day_data or {}).get("premium") or {}
-        try:
-            strike = int(float(premium_map.get(key)))
-        except Exception:
-            strike = None
-
-    entry_oi = entry_candle.get("oi")
-    exit_oi = exit_candle.get("oi")
-    try:
-        oi_change = int(exit_oi) - int(entry_oi) if entry_oi is not None and exit_oi is not None else None
-    except Exception:
-        oi_change = None
-
-    return {
-        "strike_key": key,
-        "strike_label": PREMIUM_LABELS[key],
-        "strike": strike,
-        "option_type": option_type,
-        "entry_time": entry_time,
-        "exit_time": exit_time,
-        "entry_premium": round(entry, 2),
-        "exit_premium": round(exit_, 2),
-        "premium_points": round(premium_points, 2),
-        "premium_pct": round(premium_pct, 2),
-        "highest_premium": round(highest, 2),
-        "lowest_premium": round(lowest, 2),
-        "premium_mae": round(mae, 2),
-        "premium_mfe": round(mfe, 2),
-        "entry_oi": entry_oi,
-        "exit_oi": exit_oi,
-        "oi_change": oi_change,
-        "result": "WIN" if premium_points > 0 else "LOSS" if premium_points < 0 else "FLAT",
-    }
-
-
-def _collect_premium_report(start_text, end_text):
-    start_day = _parse_report_day(start_text)
-    end_day = _parse_report_day(end_text)
-    if not start_day or not end_day:
-        return None, "Please select a valid From and To date."
-    if start_day > end_day:
-        return None, "From date cannot be after To date."
-
-    days = _report_days(start_day, end_day)
-    rows = []
-
-    for day in days:
-        if day == today_key():
-            with lock:
-                        day_data = json.loads(json.dumps({
-                    "date": day,
-                    "opening_atm": state.get("opening_atm"),
-                    "premium": state.get("premium", {}),
-                    "series": state.get("series", {}),
-                    "strategies": state.get("strategies", {}),
-                }))
-        else:
-            day_data = load_day_history(day)
-
-        trades = _strategy_trades_from_day(day, day_data)
-        for trade in trades:
-            # Only completed strategy trades have a reproducible entry -> exit interval.
-            if not (trade.get("exit_time") or trade.get("exit_timestamp")):
-                continue
-            option_type = _trade_option_type(trade)
-            if option_type not in ("CE", "PE"):
-                continue
-
-            for key in PREMIUM_KEYS:
-                metrics = _premium_trade_metrics(trade, day_data, key, option_type)
-                if not metrics:
-                    continue
-                row = {
-                    "date": day,
-                    "strategy": str(trade.get("strategy") or "").upper(),
-                    "trade_no": trade.get("trade_no"),
-                    "signal": trade.get("type") or trade.get("side") or f"SELL {option_type}",
-                    "nifty_entry": trade.get("entry_level"),
-                    "nifty_exit": trade.get("exit_level"),
-                    "nifty_points": trade.get("points"),
-                    "exit_reason": trade.get("exit_reason"),
-                    "sl_hit": bool(trade.get("sl_hit")),
-                }
-                row.update(metrics)
-                rows.append(row)
-
-    def _summary(group_rows):
-        pts = [float(r["premium_points"]) for r in group_rows]
-        wins = sum(1 for p in pts if p > 0)
-        losses = sum(1 for p in pts if p < 0)
-        flat = sum(1 for p in pts if p == 0)
-        return {
-            "trades": len(group_rows),
-            "wins": wins,
-            "losses": losses,
-            "flat": flat,
-            "win_rate": round(wins / len(group_rows) * 100, 2) if group_rows else 0.0,
-            "total_premium_points": round(sum(pts), 2),
-            "avg_premium_points": round(sum(pts) / len(pts), 2) if pts else 0.0,
-            "avg_mae": round(sum(float(r["premium_mae"]) for r in group_rows) / len(group_rows), 2) if group_rows else 0.0,
-            "avg_mfe": round(sum(float(r["premium_mfe"]) for r in group_rows) / len(group_rows), 2) if group_rows else 0.0,
-            "best_trade": round(max(pts), 2) if pts else 0.0,
-            "worst_trade": round(min(pts), 2) if pts else 0.0,
-        }
-
-    strategy_summary = {}
-    for name in ("S1", "S2", "PNA"):
-        strategy_summary[name] = _summary([r for r in rows if r["strategy"] == name])
-
-    strike_summary = {}
-    for key in PREMIUM_KEYS:
-        strike_summary[key] = _summary([r for r in rows if r["strike_key"] == key])
-
-    strategy_strike_summary = []
-    for name in ("S1", "S2", "PNA"):
-        for key in PREMIUM_KEYS:
-            group = [r for r in rows if r["strategy"] == name and r["strike_key"] == key]
-            s = _summary(group)
-            strategy_strike_summary.append({"strategy": name, "strike_key": key, "strike_label": PREMIUM_LABELS[key], **s})
-
-    daily = []
-    for day in days:
-        item = {"date": day}
-        day_rows = [r for r in rows if r["date"] == day]
-        item.update(_summary(day_rows))
-        daily.append(item)
-
-    overall = _summary(rows)
-    return {
-        "from": start_text,
-        "to": end_text,
-        "days": days,
-        "overall": overall,
-        "strategy_summary": strategy_summary,
-        "strike_summary": strike_summary,
-        "strategy_strike_summary": strategy_strike_summary,
-        "daily": daily,
-        "trades": rows,
-        "note": "Premium entry/exit uses stored 1-minute option candle close at each strategy signal minute; MAE/MFE uses minute high/low while the trade is open.",
-    }, None
-
-
-@app.route("/api/premium/reports")
-def api_premium_reports():
-    report, error = _collect_premium_report(request.args.get("from", ""), request.args.get("to", ""))
-    if error:
-        return jsonify({"error": error}), 400
-    return jsonify(report)
-
-
-def _style_workbook(wb):
-    for sheet in wb.worksheets:
-        sheet.freeze_panes = "A2"
-        for row in sheet.iter_rows():
-            for cell in row:
-                if cell.row == 1:
-                    cell.font = Font(bold=True)
-                    cell.alignment = Alignment(horizontal="center")
-        for column_cells in sheet.columns:
-            letter = column_cells[0].column_letter
-            max_len = max((len(str(c.value or "")) for c in column_cells), default=8)
-            sheet.column_dimensions[letter].width = min(max(max_len + 2, 11), 34)
-
-
-@app.route("/api/download/premium/reports")
-def download_premium_reports_excel():
-    start_text = request.args.get("from", "")
-    end_text = request.args.get("to", "")
-    report, error = _collect_premium_report(start_text, end_text)
-    if error:
-        return jsonify({"error": error}), 400
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Premium Overall Summary"
-    ws.append(["PRATIK ANALYSIS — OPTION PREMIUM PERFORMANCE"])
-    ws.append(["From", start_text, "To", end_text])
-    ws.append(["Method", report["note"]])
-    ws.append([])
-    ws.append(["Metric", "Value"])
-    for key, label in [
-        ("trades", "Premium observations (3 strikes per completed trade)"),
-        ("wins", "Profitable premium observations"),
-        ("losses", "Losing premium observations"),
-        ("flat", "Flat premium observations"),
-        ("win_rate", "Win %"),
-        ("total_premium_points", "Total premium points"),
-        ("avg_premium_points", "Avg premium points / observation"),
-        ("avg_mae", "Avg premium MAE"),
-        ("avg_mfe", "Avg premium MFE"),
-        ("best_trade", "Best premium observation"),
-        ("worst_trade", "Worst premium observation"),
-    ]:
-        ws.append([label, report["overall"][key]])
-
-    ss = wb.create_sheet("Strategy-wise Summary")
-    headers = ["Strategy", "Observations", "Wins", "Losses", "Flat", "Win %", "Total Premium Pts", "Avg Premium Pts", "Avg MAE", "Avg MFE", "Best", "Worst"]
-    ss.append(headers)
-    for name in ("S1", "S2", "PNA"):
-        m = report["strategy_summary"][name]
-        ss.append([name, m["trades"], m["wins"], m["losses"], m["flat"], m["win_rate"], m["total_premium_points"], m["avg_premium_points"], m["avg_mae"], m["avg_mfe"], m["best_trade"], m["worst_trade"]])
-
-    st = wb.create_sheet("Strike-wise Summary")
-    st.append(["Strike Group", "Observations", "Wins", "Losses", "Flat", "Win %", "Total Premium Pts", "Avg Premium Pts", "Avg MAE", "Avg MFE", "Best", "Worst"])
-    for key in PREMIUM_KEYS:
-        m = report["strike_summary"][key]
-        st.append([PREMIUM_LABELS[key], m["trades"], m["wins"], m["losses"], m["flat"], m["win_rate"], m["total_premium_points"], m["avg_premium_points"], m["avg_mae"], m["avg_mfe"], m["best_trade"], m["worst_trade"]])
-
-    combo = wb.create_sheet("Strategy x Strike")
-    combo.append(["Strategy", "Strike Group", "Observations", "Wins", "Losses", "Flat", "Win %", "Total Premium Pts", "Avg Premium Pts", "Avg MAE", "Avg MFE", "Best", "Worst"])
-    for x in report["strategy_strike_summary"]:
-        combo.append([x["strategy"], x["strike_label"], x["trades"], x["wins"], x["losses"], x["flat"], x["win_rate"], x["total_premium_points"], x["avg_premium_points"], x["avg_mae"], x["avg_mfe"], x["best_trade"], x["worst_trade"]])
-
-    trades = wb.create_sheet("Premium Entry Exit")
-    trade_headers = [
-        "Date", "Strategy", "Trade #", "Signal", "Strike Group", "Strike", "Option",
-        "Entry Time", "Entry Premium", "Exit Time", "Exit Premium", "Premium Points", "Premium %",
-        "Highest Premium", "Lowest Premium", "Premium MAE", "Premium MFE", "Entry OI", "Exit OI", "OI Change",
-        "NIFTY Entry", "NIFTY Exit", "NIFTY Points", "SL Hit?", "Premium Result", "Exit Reason",
-    ]
-    trades.append(trade_headers)
-    for r in report["trades"]:
-        trades.append([
-            r["date"], r["strategy"], r["trade_no"], r["signal"], r["strike_label"], r["strike"], r["option_type"],
-            r["entry_time"], r["entry_premium"], r["exit_time"], r["exit_premium"], r["premium_points"], r["premium_pct"],
-            r["highest_premium"], r["lowest_premium"], r["premium_mae"], r["premium_mfe"], r["entry_oi"], r["exit_oi"], r["oi_change"],
-            r["nifty_entry"], r["nifty_exit"], r["nifty_points"], "YES" if r["sl_hit"] else "NO", r["result"], r["exit_reason"],
-        ])
-
-    mm = wb.create_sheet("Premium MAE MFE")
-    mm.append(["Date", "Strategy", "Trade #", "Strike Group", "Strike", "Option", "Entry Premium", "Highest", "Lowest", "MAE", "MFE", "Premium Points"])
-    for r in report["trades"]:
-        mm.append([r["date"], r["strategy"], r["trade_no"], r["strike_label"], r["strike"], r["option_type"], r["entry_premium"], r["highest_premium"], r["lowest_premium"], r["premium_mae"], r["premium_mfe"], r["premium_points"]])
-
-    daily = wb.create_sheet("Daily Premium Summary")
-    daily.append(["Date", "Observations", "Wins", "Losses", "Flat", "Win %", "Total Premium Pts", "Avg Premium Pts", "Avg MAE", "Avg MFE", "Best", "Worst"])
-    for d in report["daily"]:
-        daily.append([d["date"], d["trades"], d["wins"], d["losses"], d["flat"], d["win_rate"], d["total_premium_points"], d["avg_premium_points"], d["avg_mae"], d["avg_mfe"], d["best_trade"], d["worst_trade"]])
-
-    compare = wb.create_sheet("NIFTY vs Premium")
-    compare.append(["Date", "Strategy", "Trade #", "Signal", "Strike Group", "Strike", "Option", "NIFTY Points", "Premium Points", "Premium %", "Premium Result"])
-    for r in report["trades"]:
-        compare.append([r["date"], r["strategy"], r["trade_no"], r["signal"], r["strike_label"], r["strike"], r["option_type"], r["nifty_points"], r["premium_points"], r["premium_pct"], r["result"]])
-
-    _style_workbook(wb)
-    # Restore the intended premium-overall title presentation after generic styling.
-    ws["A1"].font = Font(bold=True, size=16)
-    ws["A5"].font = Font(bold=True)
-
-    buffer = BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-    filename = f"Pratik_Analysis_Premium_Report_{start_text}_to_{end_text}.xlsx"
-    return send_file(buffer, as_attachment=True, download_name=filename, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-
-@app.route("/api/download/premium/raw/<day>")
-def download_raw_premium_excel(day):
-    if day == today_key():
-        with lock:
-                data = json.loads(json.dumps({
-                "date": day,
-                "expiry": state.get("expiry"),
-                "opening_atm": state.get("opening_atm"),
-                "premium": state.get("premium", {}),
-                "series": state.get("series", {}),
-            }))
-    else:
-        if not history_exists(day):
-            return jsonify({"error": "No stored data for selected date."}), 404
-        data = load_day_history(day)
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Raw Premium 1-Min"
-    ws.append(["Pratik Analysis — 1-Min Option Premium OHLC + OI"])
-    ws.append(["Date", day, "Expiry", data.get("expiry"), "Opening ATM", data.get("opening_atm")])
-    ws.append([])
-    headers = [
-        "Time",
-        "ATM -100 CE O", "H", "L", "C", "OI",
-        "ATM -100 PE O", "H", "L", "C", "OI",
-        "ATM CE O", "H", "L", "C", "OI",
-        "ATM PE O", "H", "L", "C", "OI",
-        "ATM +100 CE O", "H", "L", "C", "OI",
-        "ATM +100 PE O", "H", "L", "C", "OI",
-    ]
-    ws.append(headers)
-
-    maps = {}
-    all_times = set()
-    for key in PREMIUM_KEYS:
-        for option_type in ("CE", "PE"):
-            m = _candle_by_minute(_series_for_premium(data, key, option_type))
-            maps[(key, option_type)] = m
-            all_times.update(m.keys())
-
-    for time_key in sorted(all_times):
-        row = [time_key]
-        for key in PREMIUM_KEYS:
-            for option_type in ("CE", "PE"):
-                p = maps[(key, option_type)].get(time_key) or {}
-                row.extend([p.get("open"), p.get("high"), p.get("low"), p.get("close", p.get("ltp")), p.get("oi")])
-        ws.append(row)
-
-    _style_workbook(wb)
-    ws["A1"].font = Font(bold=True, size=16)
-    buffer = BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-    return send_file(buffer, as_attachment=True, download_name=f"Pratik_Analysis_Raw_Premium_{day}.xlsx", mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-# ============================================================
-# HEALTH
-# ============================================================
 
 @app.route("/health")
 def health():
-    return jsonify(
-        {
-            "ok": True,
-            "process_pid": os.getpid(),
-            "process_started_ist": (datetime.utcfromtimestamp(PROCESS_START_TS) + IST_OFFSET).isoformat(),
-            "tick_counter": tick_counter,
-            "oi_tick_counter": oi_tick_counter,
-            "connected": live_data_available(),
-            "socket_flag": bool(state.get("connected")),
-            "feed_message": state.get("message"),
-            "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "CLEAN-V2.6-RELIABLE-REST-OIC-CIO",
-            "snapshot_source": "fresh-tick-or-rest",
-            "feed_start_owner": "startup-or-kite-callback-only",
-            "last_snapshot_age_sec": round(time.time() - last_snapshot_ts, 1) if last_snapshot_ts else None,
-            "last_persist_ist": last_persist_ist,
-            "snapshot_source": "fresh-tick-or-rest",
-            "rest_fallback_active": rest_fallback_active,
-            "last_rest_quote_ist": last_rest_quote_ist,
-            "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "CLEAN-V2.6-SINGLE-REST-POLL-OWNER",
-            "last_tick_ist": last_live_tick_ist,
-            "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
-            "stale_restart_in_progress": stale_restart_in_progress,
-            "reconnect_in_progress": reconnect_in_progress,
-            "date": state.get(
-                "date"
-            ),
-            "option_tokens": len(
-                token_meta
-            ),
-            "latest_oi_tokens": len(
-                latest_oi
-            ),
-            "rest_poll_worker_started": rest_backup_started,
-            "rest_poll_lock_busy": rest_poll_lock.locked(),
-            "last_rest_attempt_age_sec": (
-                round(time.time() - last_rest_attempt_ts, 1)
-                if last_rest_attempt_ts else None
-            ),
-            "baseline_ready": baseline_ready,
-            "opening_atm": state.get("opening_atm"),
-            "oic_tokens": oic_tokens,
-            "oic_mapping_count": len(oic_tokens),
-            "premium_tokens": premium_token_map,
-            "premium_mapping_count": len(premium_token_map),
-            "premium_points": {
-                key: {
-                    option_type: len(
-                        state.get("series", {}).get("premium", {}).get(key, {}).get(option_type, [])
-                    )
-                    for option_type in ("CE", "PE")
-                }
-                for key in ("minus100", "atm", "plus100")
-            },
-            "database_configured": db_enabled(),
-            "database_history_days": len(db_history_dates()),
-            "cio_points": len(
-                state.get(
-                    "series",
-                    {},
-                ).get(
-                    "cio",
-                    [],
-                )
-            ),
-        }
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
+    return jsonify({
+        "ok": True,
+        "connected": state.get("connected"),
+        "message": state.get("message"),
+        "date": state.get("date"),
+        "expiry": state.get("expiry"),
+        "opening_atm": state.get("opening_atm"),
+        "locked_strikes": locked,
+        "latest_oi_tokens": len(latest_oi),
+        "baseline_ready": baseline_ready,
+        "points": {k: len(state["series"][k]) for k in ("atm","minus100","plus100","cio")},
+    })
 
 if __name__ == "__main__":
-    port = int(
-        os.environ.get(
-            "PORT",
-            "8000",
-        )
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port,
-        debug=False,
-    )
+    start_worker()
+    app.run(host="0.0.0.0", port=PORT, debug=False)
