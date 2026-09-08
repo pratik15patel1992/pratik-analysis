@@ -212,6 +212,13 @@ rest_fallback_active = False
 last_rest_quote_ts = 0.0
 last_rest_quote_ist = None
 rest_quote_errors = 0
+
+# CLEAN V2.6: one single owner for every Zerodha REST quote request.
+# Background worker, startup and /api/state all use this same lock/timer,
+# preventing duplicate requests and rate-limit collisions.
+rest_poll_lock = threading.Lock()
+last_rest_attempt_ts = 0.0
+
 live_start_mutex = threading.Lock()
 snapshot_thread_started = False
 persistence_thread_started = False
@@ -1857,26 +1864,6 @@ def make_snapshot():
     n = now_ist()
     current_m = n.hour * 60 + n.minute
 
-    # A NIFTY-only REST response can make "fresh" true while option OI is
-    # still absent. Verify all six locked OIC legs before snapshotting.
-    locked_tokens = [
-        legs.get(option_type)
-        for legs in oic_tokens.values()
-        for option_type in ("CE", "PE")
-        if legs.get(option_type)
-    ]
-    locked_oi_ready = (
-        len(locked_tokens) == 6
-        and all(token in latest_oi for token in locked_tokens)
-    )
-
-    if fresh and not locked_oi_ready:
-        refresh_market_quotes(source="snapshot_repair")
-        locked_oi_ready = (
-            len(locked_tokens) == 6
-            and all(token in latest_oi for token in locked_tokens)
-        )
-
     with lock:
         # NIFTY remains based on genuine received prices only.
         if fresh:
@@ -1884,7 +1871,7 @@ def make_snapshot():
 
         for key in ("atm", "minus100", "plus100"):
             series = state["series"][key]
-            if fresh and locked_oi_ready:
+            if fresh:
                 # Backfill only genuinely missing minutes before the current one.
                 _carry_forward_to(series, current_m, include_target=False)
                 point = oic_point(key)
@@ -1892,13 +1879,12 @@ def make_snapshot():
                     point["carried_forward"] = False
                     append_or_replace_minute(series, point)
             else:
-                # During a temporary feed gap, or before locked OI arrives,
-                # preserve continuity only if a genuine earlier row exists.
+                # During a temporary feed gap, preserve continuity with the
                 # last known valid value rather than dropping the minute.
                 _carry_forward_to(series, current_m, include_target=True)
 
         cio_series = state["series"]["cio"]
-        if fresh and locked_oi_ready and baseline_ready:
+        if fresh and baseline_ready:
             _carry_forward_to(cio_series, current_m, include_target=False)
             ce, pe = cio_totals()
             point = {
@@ -2357,6 +2343,15 @@ def start_live(access_token):
         kite = new_kite
 
         ensure_locked_strike_mappings(kite)
+
+        # CLEAN V2.6: do not wait for a daemon worker before OIC can begin.
+        # Populate latest_oi synchronously as part of a successful Kite startup.
+        initial_oi_count = poll_rest_market(force=True)
+        print(
+            f"[KITE] CLEAN V2.6 initial REST OI={initial_oi_count}, unique={len(latest_oi)}",
+            flush=True,
+        )
+
         baseline_ready = False
 
         if not baseline_thread_started:
@@ -2368,15 +2363,9 @@ def start_live(access_token):
         ensure_snapshot_worker()
         ensure_rest_backup_worker()
 
-        # Do one immediate market refresh during market hours so OIC/CIO do
-        # not wait for the background loop after a fresh login/restart.
-        if is_market_session():
-            refresh_market_quotes(force=True, source="start_live")
-
         with lock:
-            if not live_data_available():
-                state["message"] = "Starting CLEAN V2.6 REST live feed..."
-                state["connected"] = False
+            state["message"] = "Starting CLEAN V1 REST live feed..."
+            state["connected"] = False
 
         print("[KITE] CLEAN V1 REST primary feed initialized.", flush=True)
     finally:
@@ -2391,75 +2380,6 @@ def _rest_quote_symbols():
     symbols = ["NSE:NIFTY 50", "NSE:INDIA VIX"]
     symbols.extend(f"NFO:{meta['symbol']}" for meta in token_meta.values())
     return symbols
-
-
-market_refresh_lock = threading.Lock()
-last_market_refresh_ts = 0.0
-
-def refresh_market_quotes(force=False, source="worker"):
-    """Single authoritative REST refresh for NIFTY/VIX + all NIFTY option OI.
-
-    Both the background worker and /api/state use this same rate gate, so the
-    dashboard can self-heal if the worker stalls without double-polling Zerodha.
-    """
-    global last_market_refresh_ts, rest_quote_errors, rest_fallback_active
-
-    if kite is None or not token_meta:
-        return 0
-
-    if not is_market_session():
-        return 0
-
-    now_ts = time.time()
-
-    # One refresh at most every 1.25 seconds across ALL callers.
-    if not force and (now_ts - last_market_refresh_ts) < 1.25:
-        return 0
-
-    if not market_refresh_lock.acquire(blocking=False):
-        return 0
-
-    try:
-        now_ts = time.time()
-        if not force and (now_ts - last_market_refresh_ts) < 1.25:
-            return 0
-
-        # Ensure the locked ATM/±100 token mapping exists before the quote.
-        ensure_locked_strike_mappings(kite)
-
-        symbols = _rest_quote_symbols()
-        quotes = kite.quote(symbols)
-        count = _apply_rest_quotes(quotes)
-
-        last_market_refresh_ts = time.time()
-        rest_quote_errors = 0
-        rest_fallback_active = True
-
-        with lock:
-            state["connected"] = True
-            state["message"] = "LIVE — Zerodha REST primary"
-            state["last_update"] = now_ist().isoformat()
-
-        print(
-            f"[KITE] SELF-HEAL refresh source={source}; "
-            f"OI contracts={count}/{len(token_meta)}",
-            flush=True,
-        )
-
-        return count
-
-    except Exception as e:
-        rest_quote_errors += 1
-        print(
-            f"[KITE] SELF-HEAL refresh warning source={source}: "
-            f"{type(e).__name__}: {e}",
-            flush=True,
-        )
-        return 0
-
-    finally:
-        market_refresh_lock.release()
-
 
 def _apply_rest_quotes(quotes):
     """Apply REST Quote payload without pretending it was a WebSocket tick."""
@@ -2501,29 +2421,100 @@ def _apply_rest_quotes(quotes):
         state["message"] = "LIVE — Zerodha REST backup"
     return option_updates
 
+def poll_rest_market(force=False):
+    """Fetch one complete Zerodha quote snapshot safely.
+
+    All REST quote callers share this function so only one request can be in
+    flight and requests are spaced safely. A successful call must populate
+    current OI for the nearest-expiry option universe before OIC snapshots run.
+    """
+    global rest_fallback_active
+    global rest_quote_errors
+    global last_rest_attempt_ts
+
+    if not is_market_session() or kite is None or not token_meta:
+        rest_fallback_active = False
+        return 0
+
+    now_ts = time.time()
+
+    # Normal polling interval is ~2 seconds. Startup can force the first call.
+    if not force and last_rest_attempt_ts and (now_ts - last_rest_attempt_ts) < 1.8:
+        return len(latest_oi)
+
+    acquired = rest_poll_lock.acquire(timeout=8 if force else 0.05)
+    if not acquired:
+        return len(latest_oi)
+
+    try:
+        now_ts = time.time()
+        if not force and last_rest_attempt_ts and (now_ts - last_rest_attempt_ts) < 1.8:
+            return len(latest_oi)
+
+        last_rest_attempt_ts = now_ts
+        rest_fallback_active = True
+
+        quotes = kite.quote(_rest_quote_symbols())
+        count = _apply_rest_quotes(quotes)
+
+        rest_quote_errors = 0
+        with lock:
+            state["connected"] = True
+            state["message"] = "LIVE — Zerodha REST primary"
+
+        print(
+            f"[KITE] CLEAN V2.6 REST live; OI contracts={count}, unique={len(latest_oi)}",
+            flush=True,
+        )
+        return count
+
+    except Exception as e:
+        rest_quote_errors += 1
+        with lock:
+            state["connected"] = False
+            state["message"] = f"REST live feed warning ({type(e).__name__})"
+
+        print(
+            f"[KITE] CLEAN V2.6 REST warning: {type(e).__name__}: {e}",
+            flush=True,
+        )
+        return 0
+
+    finally:
+        rest_poll_lock.release()
+
+
 def rest_backup_worker():
-    """Primary live REST worker; /api/state is a self-healing fallback."""
-    print("[KITE] CLEAN V2.6 REST worker started", flush=True)
+    """Continuous primary REST feed with a single synchronized request owner."""
+    global rest_fallback_active
+    print("[KITE] CLEAN V2.6 REST PRIMARY worker started", flush=True)
 
     while True:
         try:
             if is_market_session():
-                refresh_market_quotes(source="worker")
+                poll_rest_market(force=False)
+            else:
+                rest_fallback_active = False
         except Exception as e:
-            print(
-                f"[KITE] CLEAN V2.6 worker warning: {type(e).__name__}: {e}",
-                flush=True,
-            )
+            print(f"[KITE] CLEAN V2.6 worker warning: {e}", flush=True)
 
-        time.sleep(1.0)
+        # poll_rest_market itself enforces the request interval.
+        time.sleep(0.5)
 
 
 def ensure_rest_backup_worker():
     global rest_backup_started
+
     if rest_backup_started:
         return
+
     rest_backup_started = True
-    threading.Thread(target=rest_backup_worker, daemon=True, name="kite-rest-backup").start()
+    threading.Thread(
+        target=rest_backup_worker,
+        daemon=True,
+        name="kite-rest-primary",
+    ).start()
+
 
 def reconnect_watchdog():
     """Stage 7H: observe WebSocket health; do not kill the worker.
@@ -2941,9 +2932,13 @@ def request_rest_refresh_if_due():
 
 @app.route("/api/state")
 def api_state():
-    # If the background worker has stalled, the browser request itself
-    # refreshes the market state through the same rate-safe refresh gate.
-    refresh_market_quotes(source="api_state")
+    # Browser polling is a safety net only. It shares the exact same REST
+    # lock/timer with the background worker, so this cannot double-poll Zerodha.
+    if is_market_session():
+        rest_age = (time.time() - last_rest_quote_ts) if last_rest_quote_ts else None
+        if rest_age is None or rest_age > 4 or len(latest_oi) < 6:
+            poll_rest_market(force=False)
+
     with lock:
         return jsonify(state)
 
@@ -3950,7 +3945,7 @@ def health():
             "socket_flag": bool(state.get("connected")),
             "feed_message": state.get("message"),
             "reconnect_watchdog": reconnect_watchdog_started,
-            "feed_architecture": "CLEAN-V2.6-SELF-HEALING-OIC-CIO",
+            "feed_architecture": "CLEAN-V2.6-RELIABLE-REST-OIC-CIO",
             "snapshot_source": "fresh-tick-or-rest",
             "feed_start_owner": "startup-or-kite-callback-only",
             "last_snapshot_age_sec": round(time.time() - last_snapshot_ts, 1) if last_snapshot_ts else None,
@@ -3959,7 +3954,7 @@ def health():
             "rest_fallback_active": rest_fallback_active,
             "last_rest_quote_ist": last_rest_quote_ist,
             "rest_quote_errors": rest_quote_errors,
-            "reconnect_fix": "CLEAN-V2.6-RATE-SAFE-REST",
+            "reconnect_fix": "CLEAN-V2.6-SINGLE-REST-POLL-OWNER",
             "last_tick_ist": last_live_tick_ist,
             "last_tick_age_sec": (round(time.time() - last_live_tick_ts, 1) if last_live_tick_ts else None),
             "stale_restart_in_progress": stale_restart_in_progress,
@@ -3972,6 +3967,12 @@ def health():
             ),
             "latest_oi_tokens": len(
                 latest_oi
+            ),
+            "rest_poll_worker_started": rest_backup_started,
+            "rest_poll_lock_busy": rest_poll_lock.locked(),
+            "last_rest_attempt_age_sec": (
+                round(time.time() - last_rest_attempt_ts, 1)
+                if last_rest_attempt_ts else None
             ),
             "baseline_ready": baseline_ready,
             "opening_atm": state.get("opening_atm"),
