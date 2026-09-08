@@ -2984,17 +2984,94 @@ def request_rest_refresh_if_due():
     return False
 
 
+def _minute_number_from_label(label):
+    try:
+        hh, mm = str(label or "").split(":", 1)
+        return int(hh) * 60 + int(mm)
+    except Exception:
+        return None
+
+
+def _series_since(rows, since_minute):
+    """Return rows at/after the browser's last visible minute.
+
+    Including the matching minute is intentional: the current minute can be
+    replaced as fresh REST/WebSocket values arrive, so the browser needs the
+    latest version of that point as well as any newly-created minutes.
+    """
+    if not isinstance(rows, list):
+        return []
+    if since_minute is None:
+        return list(rows)
+    out = []
+    for row in rows:
+        m = _minute_number_from_label((row or {}).get("time"))
+        if m is None or m >= since_minute:
+            out.append(row)
+    return out
+
+
 @app.route("/api/state")
 def api_state():
-    # Browser polling is a safety net only. It shares the exact same REST
-    # lock/timer with the background worker, so this cannot double-poll Zerodha.
-    if is_market_session():
-        rest_age = (time.time() - last_rest_quote_ts) if last_rest_quote_ts else None
-        if rest_age is None or rest_age > 4 or len(latest_oi) < 6:
-            poll_rest_market(force=False)
-
+    # IMPORTANT: browser requests must never call Zerodha directly. Market-data
+    # collection belongs exclusively to the background REST/WebSocket workers.
+    # This keeps /api/state responsive even when Zerodha is temporarily slow.
     with lock:
         return jsonify(state)
+
+
+@app.route("/api/live/delta")
+def api_live_delta():
+    """Small incremental live payload for the browser.
+
+    The dashboard downloads the full intraday state only once. Subsequent
+    refreshes ask for rows at/after the last minute already present in the
+    browser and merge them locally. This avoids repeatedly sending the entire
+    growing trading-day history every few seconds.
+    """
+    since_raw = (request.args.get("since") or "").strip()
+    since_minute = _minute_number_from_label(since_raw) if since_raw else None
+
+    with lock:
+        src_series = state.get("series", {}) or {}
+        premium = src_series.get("premium", {}) or {}
+
+        delta = {
+            "configured": state.get("configured"),
+            "connected": state.get("connected"),
+            "message": state.get("message"),
+            "last_update": state.get("last_update"),
+            "date": state.get("date"),
+            "expiry": state.get("expiry"),
+            "nifty": state.get("nifty", {}),
+            "vix": state.get("vix", {}),
+            "zone": state.get("zone", {}),
+            "opening_atm": state.get("opening_atm"),
+            "oic": state.get("oic", {}),
+            "feed_health": state.get("feed_health", {}),
+            "strategies": state.get("strategies", {}),
+            "strategy_engine": state.get("strategy_engine", {}),
+            "history_dates": state.get("history_dates", []),
+            "series": {
+                "nifty": _series_since(src_series.get("nifty", []), since_minute),
+                "atm": _series_since(src_series.get("atm", []), since_minute),
+                "minus100": _series_since(src_series.get("minus100", []), since_minute),
+                "plus100": _series_since(src_series.get("plus100", []), since_minute),
+                "cio": _series_since(src_series.get("cio", []), since_minute),
+                "premium": {
+                    key: {
+                        opt: _series_since(
+                            ((premium.get(key) or {}).get(opt) or []),
+                            since_minute,
+                        )
+                        for opt in ("CE", "PE")
+                    }
+                    for key in ("minus100", "atm", "plus100")
+                },
+            },
+        }
+
+    return jsonify(delta)
 
 
 @app.route("/api/history/dates")
