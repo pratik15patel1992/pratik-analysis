@@ -58,7 +58,7 @@ table{width:100%;border-collapse:collapse;font-size:11px}th,td{padding:6px;borde
     <div class="strategyCard"><h3>PNA Strategy</h3><div class="mini">30-point hard SL</div><table><thead><tr><th>Entry</th><th>Level</th><th>Exit</th><th>Points</th></tr></thead><tbody id="pna"></tbody></table></div>
   </div>
 
-  <div class="card download"><div><h3>Download NIFTY + OIC + CIO Data (Excel)</h3><p id="downloadText">Selected-date minute-wise data + NIFTY OHLC + S1/S2/PNA summary</p></div><button onclick="downloadExcel()">Download Excel</button></div>
+  <div class="card download"><div><h3>Download Reports for Selected Date</h3><p id="downloadText">NIFTY OHLC + OIC + CIO data and S1/S2/PNA strategy summary</p></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button onclick="downloadDataExcel()">Download NIFTY + OIC + CIO</button><button onclick="downloadStrategyExcel()">Download Strategy Summary</button></div></div>
 </div>
 <script>
 const selected={atm:1,plus100:1,minus100:1,cio:1}, charts={};
@@ -75,7 +75,9 @@ function render(s){let a=Number(s.opening_atm);document.getElementById("atmText"
 async function load(){try{let url="/api/state"+(selectedDate?`?date=${encodeURIComponent(selectedDate)}`:"");let r=await fetch(url,{cache:"no-store"}),s=await r.json();document.getElementById("status").textContent=s.message||"—";document.getElementById("last").textContent=`Last update: ${s.last_update?new Date(s.last_update).toLocaleTimeString("en-IN"):"—"}`;if(s.date&&!selectedDate&&s.date!==localToday())document.getElementById("historyDate").value=s.date;render(s)}catch(e){document.getElementById("status").textContent="Unable to load state"}}
 function loadSelectedDate(){const v=document.getElementById("historyDate").value;if(!v)return;selectedDate=(v===localToday())?"":v;load()}
 function liveToday(){selectedDate="";document.getElementById("historyDate").value=localToday();load()}
-function downloadExcel(){const day=selectedDate||document.getElementById("historyDate").value||localToday();location.href=`/api/download/cio?date=${encodeURIComponent(day)}`}
+function selectedDownloadDay(){return selectedDate||document.getElementById("historyDate").value||localToday()}
+function downloadDataExcel(){const day=selectedDownloadDay();window.location.href=`/api/download/data?date=${encodeURIComponent(day)}`}
+function downloadStrategyExcel(){const day=selectedDownloadDay();window.location.href=`/api/download/strategy?date=${encodeURIComponent(day)}`}
 function tf(k,m,b){selected[k]=m;document.querySelectorAll(`[data-g="${k}"]`).forEach(x=>x.classList.remove("active"));b.classList.add("active");load()}
 function reset(k){if(charts[k]?.resetZoom)charts[k].resetZoom()}
 function full(id){document.getElementById(id).classList.toggle("full");setTimeout(()=>Object.values(charts).forEach(c=>c.resize()),50)}
