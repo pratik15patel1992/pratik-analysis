@@ -52,6 +52,8 @@ baseline_oi = {}
 baseline_ready = False
 last_poll = 0.0
 worker_started = False
+worker_thread = None
+worker_pid = None
 last_persist_label = None
 last_persist_epoch = 0.0
 
@@ -916,11 +918,28 @@ def worker():
 
 
 def start_worker():
-    global worker_started
-    if worker_started:
+    """Start the REST poller in the CURRENT Gunicorn worker process.
+
+    Render/Gunicorn may preload the module before forking. A thread created
+    before fork does not survive in the child, while the old boolean flag can.
+    Track PID + actual thread liveness so login always starts a real poller.
+    """
+    global worker_started, worker_thread, worker_pid
+    pid = os.getpid()
+
+    if worker_pid == pid and worker_thread is not None and worker_thread.is_alive():
+        worker_started = True
         return
+
     worker_started = True
-    threading.Thread(target=worker, daemon=True).start()
+    worker_pid = pid
+    worker_thread = threading.Thread(
+        target=worker,
+        daemon=True,
+        name=f"pna-rest-poller-{pid}",
+    )
+    worker_thread.start()
+    print(f"[WORKER] REST poller started pid={pid}", flush=True)
 
 
 def reset_for_new_day():
@@ -1248,6 +1267,9 @@ def health():
         "locked_strikes": locked,
         "latest_oi_tokens": len(latest_oi),
         "baseline_ready": baseline_ready,
+        "poller_alive": bool(worker_thread is not None and worker_thread.is_alive()),
+        "poller_pid": worker_pid,
+        "process_pid": os.getpid(),
         "database": db_enabled(),
         "stored_dates": stored_dates(),
         "points": {k: len(state["series"][k]) for k in ("atm", "minus100", "plus100", "cio")},
@@ -1255,10 +1277,12 @@ def health():
 
 
 # Safe startup: initialize DB, seed 08-09-2026 if absent, restore today if present.
+# IMPORTANT: do not start background threads here. Gunicorn may preload this
+# module before forking, which would leave child workers with a stale flag and
+# no live thread. The poller is started only after Zerodha login in start_live().
 init_db()
 import_seed_if_needed()
 restore_today_from_db()
-start_worker()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT, debug=False)
