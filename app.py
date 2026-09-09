@@ -100,6 +100,18 @@ def round_to_100(v):
     return int(round(float(v) / 100.0) * 100)
 
 
+def valid_opening_atm(v):
+    """Return True only for a real, positive ATM value.
+
+    A stored/default value of 0 is invalid and must never block today's
+    Zerodha opening-price based ATM locking.
+    """
+    try:
+        return float(v) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def append_or_replace(series, point):
     if series and series[-1].get("time") == point.get("time"):
         series[-1] = point
@@ -352,7 +364,10 @@ def restore_today_from_db():
     with lock:
         state["date"] = hist["date"]
         state["expiry"] = hist["expiry"]
-        state["opening_atm"] = hist["opening_atm"]
+        restored_atm = hist.get("opening_atm")
+        # Older/partial session rows may contain 0. Treat it as missing so
+        # today's live feed can lock the real ATM from Zerodha.
+        state["opening_atm"] = restored_atm if valid_opening_atm(restored_atm) else None
         state["last_update"] = hist["last_update"]
         state["series"] = hist["series"]
         state["strategies"] = hist["strategies"]
@@ -543,16 +558,33 @@ def lock_strikes(k):
     global locked
     with lock:
         atm = state.get("opening_atm")
-    if not atm:
+
+    # Never accept 0 (or any non-positive value) as today's ATM.
+    # This can happen when an empty session row is restored before the
+    # market has supplied a valid NIFTY opening price.
+    if not valid_opening_atm(atm):
         n = quote_nifty(k)
-        if n.get("open") is None:
+        day_open = n.get("open")
+        try:
+            day_open = float(day_open) if day_open is not None else None
+        except (TypeError, ValueError):
+            day_open = None
+
+        # At/just before market open Zerodha can temporarily return 0.
+        # Do not lock 0; leave ATM unset and retry on the next poll.
+        if day_open is None or day_open <= 0:
+            with lock:
+                state["opening_atm"] = None
+                state["nifty"].update(n)
+            locked = {}
             return False
-        atm = round_to_100(n["open"])
+
+        atm = round_to_100(day_open)
         with lock:
             state["opening_atm"] = atm
             state["nifty"].update(n)
 
-    wanted = {"minus100": atm - 100, "atm": atm, "plus100": atm + 100}
+    wanted = {"minus100": int(atm) - 100, "atm": int(atm), "plus100": int(atm) + 100}
     m = {}
     for key, strike in wanted.items():
         ce = pe = None
@@ -565,8 +597,13 @@ def lock_strikes(k):
                 pe = token
         if ce and pe:
             m[key] = {"strike": strike, "CE": ce, "PE": pe}
+
     locked = m
-    return len(locked) == 3
+    if len(locked) != 3:
+        print(f"[ATM] waiting for strike lock: atm={atm}, locked={list(locked.keys())}", flush=True)
+        return False
+
+    return True
 
 
 def previous_oi(k, token):
@@ -820,8 +857,10 @@ def poll_once():
                 latest_oi[token] = int(q["oi"])
 
         n = state["nifty"]
-        if state.get("opening_atm") is None and n.get("open") is not None:
-            state["opening_atm"] = round_to_100(n["open"])
+        # Retry ATM/strike locking until a genuine positive opening ATM and
+        # all three strike pairs are available. This prevents an early 0
+        # value from freezing the collector for the whole day.
+        if not valid_opening_atm(state.get("opening_atm")) or len(locked) != 3:
             lock_strikes(kite)
 
         ts = now_ist().isoformat()
